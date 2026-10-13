@@ -10,7 +10,7 @@ enum Settings {
             "microphone": "auto",
             "sounds": true,
             "trailingSpace": true,
-            "micReady": -1,
+            "keepMicWarm": true,
         ])
     }
 
@@ -37,10 +37,9 @@ enum Settings {
         set { d.set(newValue, forKey: "trailingSpace") }
     }
 
-    /// Seconds the mic stays open after a dictation: -1 = always open (first dictation gets a
-    /// pre-roll too), 0 = close immediately. An open mic means no clipped first word.
-    static var micReady: Int {
-        get { d.integer(forKey: "micReady") }
-        set { d.set(newValue, forKey: "micReady") }
+    /// Keep the mic open for a while after a dictation: no start-up clipping, plus a short pre-roll.
+    static var keepMicWarm: Bool {
+        get { d.bool(forKey: "keepMicWarm") }
+        set { d.set(newValue, forKey: "keepMicWarm") }
     }
 }

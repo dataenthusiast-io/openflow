@@ -39,12 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Settings.registerDefaults()
         setUpMenu()
         setUpClient()
-        audio.onEngineLost = { [weak self] in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self?.primeMicIfAlwaysReady() }
-        }
-        AudioCapture.requestPermission { [weak self] ok in
-            if ok { self?.primeMicIfAlwaysReady() } else { Log.write("microphone permission denied") }
-        }
+        AudioCapture.requestPermission { ok in if !ok { NSLog("OpenFlow: microphone permission denied") } }
         _ = TextInserter.hasAccessibility(prompt: true)
         startHotkey()
 
@@ -84,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             pendingTap = nil
             state = .recording(Date(), locked: true)
             overlay.model.locked = true
+            play("Morse")
         case .recording(_, locked: true):  // press again to finish hands-free mode
             endDictation()
         case .recording:
@@ -121,16 +117,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         audio.onLevel = { [overlay] level in
             DispatchQueue.main.async { overlay.model.level = 0.5 * overlay.model.level + 0.5 * level }  // smooth jitter
         }
-        audio.warmSeconds = TimeInterval(Settings.micReady)
+        audio.warmSeconds = Settings.keepMicWarm ? 30 : 0
         do {
             try audio.begin(device: AudioDevices.resolve(Settings.microphone)?.id)
         } catch {
-            Log.write("audio start failed: \(error.localizedDescription)")
+            NSLog("OpenFlow: audio start failed: %@", error.localizedDescription)
             client.cancel()
             return
         }
         state = .recording(Date(), locked: false)
-        overlay.show()  // no start sound: the mic would pick it up over your first word
+        overlay.show()
+        play("Tink")
     }
 
     private func endDictation() {
@@ -295,18 +292,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(submenu("Microphone", mics))
 
-        let ready = NSMenu()
-        for (seconds, name) in [(-1, "Always (instant start, orange mic dot stays on)"),
-                                (30, "30 s After Each Dictation"), (0, "Off (first word may be clipped)")] {
-            let entry = item(name, #selector(chooseMicReady(_:)))
-            entry.tag = seconds
-            entry.state = Settings.micReady == seconds ? .on : .off
-            ready.addItem(entry)
-        }
-        menu.addItem(submenu("Keep Mic Ready", ready))
-
         menu.addItem(toggle("Sounds", Settings.sounds, #selector(toggleSounds)))
         menu.addItem(toggle("Add Space After Text", Settings.trailingSpace, #selector(toggleTrailingSpace)))
+        menu.addItem(toggle("Keep Mic Ready for 30 s", Settings.keepMicWarm, #selector(toggleKeepMicWarm)))
         menu.addItem(toggle("Launch at Login", SMAppService.mainApp.status == .enabled, #selector(toggleLogin)))
         menu.addItem(.separator())
         menu.addItem(item("Restart ASR", #selector(restartASR)))
@@ -370,27 +358,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func chooseMicrophone(_ sender: NSMenuItem) {
         Settings.microphone = sender.representedObject as? String ?? "auto"
-        guard case .idle = state else { return }
-        audio.shutdown()  // reopen on the new device
-        primeMicIfAlwaysReady()
-    }
-
-    @objc private func chooseMicReady(_ sender: NSMenuItem) {
-        Settings.micReady = sender.tag
-        audio.warmSeconds = TimeInterval(sender.tag)
-        guard case .idle = state else { return }
-        if sender.tag < 0 { primeMicIfAlwaysReady() } else { audio.shutdown() }
-    }
-
-    private func primeMicIfAlwaysReady() {
-        guard Settings.micReady < 0 else { return }
-        audio.warmSeconds = -1
-        audio.prime(device: AudioDevices.resolve(Settings.microphone)?.id)
+        audio.shutdown()  // reopen on the new device next time
     }
 
     @objc private func toggleSounds() { Settings.sounds.toggle() }
     @objc private func toggleTrailingSpace() { Settings.trailingSpace.toggle() }
 
+    @objc private func toggleKeepMicWarm() {
+        Settings.keepMicWarm.toggle()
+        if !Settings.keepMicWarm, case .idle = state { audio.shutdown() }
+    }
 
     @objc private func restartASR() {
         setStatus("ASR: restarting…")

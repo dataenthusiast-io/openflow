@@ -53,14 +53,9 @@ The menu bar menu has:
 - **Microphone:** "Automatic" uses the system input but skips Bluetooth headsets in favor of the
   built-in mic. Opening a headset mic switches it to low-quality call audio (worse transcripts, mono
   music) and takes long enough to clip your first word. You can also pick any device explicitly.
-- **Keep Mic Ready:** a closed mic needs a moment before audio flows, and losing even ~150 ms makes
-  the model drop the first word ("Okay, what…" → "What…"). **Always** (default) keeps the mic open
-  and holds only the last 500 ms in memory, so every dictation starts with that pre-roll. Nothing is
-  kept or sent unless you dictate, but the orange mic dot stays on. **30 s** keeps it open after each
-  dictation; **Off** closes it right away.
-- **Sounds** (a soft pop after pasting; there is no start sound because the mic would hear it),
-  **Add Space After Text**, **Launch at Login**.
-- App log with mic start timings: `~/Library/Logs/OpenFlow.log`.
+- **Keep Mic Ready for 30 s:** after a dictation the mic stays open briefly, so the next one starts
+  instantly with 300 ms of pre-roll. The orange mic indicator stays on during that time.
+- **Sounds**, **Add Space After Text**, **Launch at Login**.
 - "um" is only treated as a filler in English, because it's a real German word ("um zehn Uhr").
 
 ### Formatting while you speak

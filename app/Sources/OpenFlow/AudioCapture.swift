@@ -3,17 +3,12 @@ import CoreAudio
 
 /// Captures one input device and delivers 16 kHz mono Int16 PCM chunks plus an RMS level.
 ///
-/// Opening a mic takes a moment before audio flows; whatever is said in that moment is lost, and
-/// losing ~150 ms is enough for the model to drop the first word. So the engine can stay open
-/// ("warm") after a dictation, or permanently, keeping only the last 500 ms in memory. A press then
-/// starts instantly, beginning with that pre-roll.
+/// After a dictation the engine can stay "warm" for a while: the next press starts instantly and
+/// gets a short pre-roll, so a word started together with the key press isn't clipped.
 final class AudioCapture {
     var onAudio: (Data) -> Void = { _ in }
     var onLevel: (Float) -> Void = { _ in }
-    /// How long the engine stays open after a dictation; negative = forever.
     var warmSeconds: TimeInterval = 0
-    /// The engine stopped on its own (device unplugged, default input changed).
-    var onEngineLost: () -> Void = {}
 
     private var engine: AVAudioEngine?
     private var deviceID: AudioDeviceID?
@@ -26,9 +21,7 @@ final class AudioCapture {
     private var capturing = false
     private var sendPreroll = false
     private var ring: [Int16] = []
-    private static let prerollSamples = 16_000 / 2  // 500 ms
-    private var beganAt = Date()
-    private var beganCold = false
+    private static let prerollSamples = 16_000 * 3 / 10  // 300 ms
 
     static func requestPermission(_ done: @escaping (Bool) -> Void) {
         AVCaptureDevice.requestAccess(for: .audio) { ok in DispatchQueue.main.async { done(ok) } }
@@ -38,20 +31,11 @@ final class AudioCapture {
     func begin(device: AudioDeviceID?) throws {
         coolDown?.cancel()
         if engine != nil, device != deviceID { shutdown() }
-        beganAt = Date()
-        beganCold = engine == nil
         if engine == nil { try startEngine(device: device) }
         lock.lock()
         capturing = true
         sendPreroll = true
         lock.unlock()
-    }
-
-    /// Open the engine without delivering audio, so even the first dictation gets a pre-roll.
-    func prime(device: AudioDeviceID?) {
-        if engine != nil, device == deviceID { return }
-        shutdown()
-        do { try startEngine(device: device) } catch { Log.write("mic prime failed: \(error.localizedDescription)") }
     }
 
     /// Stop delivering audio; keeps the engine warm for `warmSeconds`.
@@ -60,7 +44,6 @@ final class AudioCapture {
         capturing = false
         ring.removeAll(keepingCapacity: true)
         lock.unlock()
-        if warmSeconds < 0 { return }
         guard warmSeconds > 0 else { return shutdown() }
         let work = DispatchWorkItem { [weak self] in self?.shutdown() }
         coolDown = work
@@ -113,10 +96,7 @@ final class AudioCapture {
         // Device unplugged or default changed: drop the engine; the next press starts a new one.
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
-        ) { [weak self] _ in
-            self?.shutdown()
-            self?.onEngineLost()
-        }
+        ) { [weak self] _ in self?.shutdown() }
 
         engine.prepare()
         try engine.start()
@@ -127,11 +107,9 @@ final class AudioCapture {
     /// Audio thread: ring-buffer while warm, deliver (pre-roll first) while capturing.
     private func handle(_ samples: UnsafeBufferPointer<Int16>) {
         var chunk: [Int16]?
-        var prerollMs: Int?
         lock.lock()
         if capturing {
             if sendPreroll {
-                prerollMs = ring.count / 16
                 chunk = ring + samples
                 ring.removeAll(keepingCapacity: true)
                 sendPreroll = false
@@ -144,10 +122,6 @@ final class AudioCapture {
         }
         lock.unlock()
         guard let chunk else { return }
-        if let prerollMs {
-            let ms = Int(Date().timeIntervalSince(beganAt) * 1000)
-            Log.write("mic \(beganCold ? "cold" : "warm") start: first audio \(ms) ms after key press, pre-roll \(prerollMs) ms")
-        }
 
         var sum: Float = 0
         for s in samples { let f = Float(s) / 32768; sum += f * f }
