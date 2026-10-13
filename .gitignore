@@ -1,0 +1,14 @@
+# build output
+build/
+app/.build/
+app/.swiftpm/
+
+# python
+asr/.venv/
+__pycache__/
+*.pyc
+
+# macOS / editors
+.DS_Store
+.vscode/
+*.log

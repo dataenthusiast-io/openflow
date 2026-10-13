@@ -1,0 +1,13 @@
+[project]
+name = "flow-asr"
+version = "0.1.0"
+description = "Streaming Nemotron ASR sidecar for Flow dictation"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "transformers>=5.13.0",
+    "torch>=2.8",
+    "numpy",
+    "sentencepiece",
+    "protobuf",
+    "librosa>=1.0.0",
+]
