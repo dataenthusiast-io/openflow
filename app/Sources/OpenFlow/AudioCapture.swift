@@ -16,7 +16,7 @@ final class AudioCapture {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard let converter = AVAudioConverter(from: format, to: target) else {
-            throw NSError(domain: "Flow", code: 1, userInfo: [NSLocalizedDescriptionKey: "no converter for \(format)"])
+            throw NSError(domain: "OpenFlow", code: 1, userInfo: [NSLocalizedDescriptionKey: "no converter for \(format)"])
         }
         let ratio = target.sampleRate / format.sampleRate
 

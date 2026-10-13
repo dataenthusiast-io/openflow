@@ -13,7 +13,8 @@ final class OverlayModel: ObservableObject {
     @Published var finishing = false
 
     private var batchStarted = Date.distantPast
-    private static let maxChars = 160
+    private static let maxChars = 320
+    private static let maxLines = 4  // logical lines; wrapping can add more on screen
 
     func reset() {
         text = ""
@@ -40,8 +41,10 @@ final class OverlayModel: ObservableObject {
         text = new
     }
 
-    /// Keep the HUD to ~2 lines: show the most recent words.
-    private static func tail(_ s: String) -> String {
+    /// Keep the HUD small: show the most recent lines and words.
+    private static func tail(_ full: String) -> String {
+        let lines = full.split(separator: "\n", omittingEmptySubsequences: false)
+        let s = lines.count > maxLines ? lines.suffix(maxLines).joined(separator: "\n") : full
         guard s.count > maxChars else { return s }
         let cut = s.suffix(maxChars)
         let word = cut.firstIndex(of: " ").map { cut.index(after: $0) } ?? cut.startIndex
@@ -53,7 +56,7 @@ final class OverlayModel: ObservableObject {
 final class OverlayPanel {
     let model = OverlayModel()
     private let panel: NSPanel
-    private static let size = NSSize(width: 720, height: 200)
+    private static let size = NSSize(width: 720, height: 280)
 
     init() {
         panel = NSPanel(
@@ -98,6 +101,7 @@ private let brand = LinearGradient(
 )
 
 private struct OverlayView: View {
+    static let maxLines = 8
     @ObservedObject var model: OverlayModel
     @Namespace private var glass
 
@@ -155,7 +159,8 @@ private struct OverlayView: View {
                 + Text(verbatim: String(model.text[split...])).customAttribute(Fresh()))
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(.primary)
-                .lineLimit(2)
+                .lineLimit(Self.maxLines)
+                .truncationMode(.head)  // if it still overflows, drop the oldest text
                 .multilineTextAlignment(.leading)
                 .contentTransition(.identity)  // no crossfade on re-wrap; RevealRenderer handles new glyphs
                 .frame(maxWidth: 520, alignment: .leading)

@@ -5,7 +5,7 @@ import Foundation
 final class SidecarManager {
     let asrDir: String
     let socketPath: String
-    let logPath = NSHomeDirectory() + "/Library/Logs/Flow-asr.log"
+    let logPath = NSHomeDirectory() + "/Library/Logs/OpenFlow-asr.log"
 
     private var process: Process?
     private var stopping = false
@@ -38,7 +38,7 @@ final class SidecarManager {
         p.terminationHandler = { [weak self] proc in
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 guard let self, !self.stopping, self.process === proc else { return }
-                NSLog("Flow: ASR sidecar exited (%d), restarting", proc.terminationStatus)
+                NSLog("OpenFlow: ASR sidecar exited (%d), restarting", proc.terminationStatus)
                 self.process = nil
                 self.start()
             }
@@ -47,7 +47,7 @@ final class SidecarManager {
             try p.run()
             process = p
         } catch {
-            NSLog("Flow: failed to launch sidecar: %@", error.localizedDescription)
+            NSLog("OpenFlow: failed to launch sidecar: %@", error.localizedDescription)
         }
     }
 

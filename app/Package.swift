@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "Flow",
+    name: "OpenFlow",
     platforms: [.macOS(.v15)],
     targets: [
         .executableTarget(
-            name: "Flow",
-            path: "Sources/Flow",
+            name: "OpenFlow",
+            path: "Sources/OpenFlow",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]

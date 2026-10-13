@@ -1,4 +1,4 @@
-// Renders Flow's app icon into an .iconset and converts it to .icns.
+// Renders OpenFlow's app icon into an .iconset and converts it to .icns.
 // Usage: swift scripts/make-icon.swift <out.icns>
 import AppKit
 
@@ -62,7 +62,7 @@ func renderIcon(px: Int) -> NSBitmapImageRep {
 }
 
 let out = URL(fileURLWithPath: CommandLine.arguments[1])
-let iconset = FileManager.default.temporaryDirectory.appendingPathComponent("Flow-\(UUID().uuidString).iconset")
+let iconset = FileManager.default.temporaryDirectory.appendingPathComponent("OpenFlow-\(UUID().uuidString).iconset")
 try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true)
 for pt in [16, 32, 128, 256, 512] {
     for scale in [1, 2] {

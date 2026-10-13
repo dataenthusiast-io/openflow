@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>local.flow.dictation</string>
+    <string>dev.openflow.dictation</string>
     <key>CFBundleName</key>
-    <string>Flow</string>
+    <string>OpenFlow</string>
     <key>CFBundleDisplayName</key>
-    <string>Flow</string>
+    <string>OpenFlow</string>
     <key>CFBundleExecutable</key>
-    <string>Flow</string>
+    <string>OpenFlow</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -23,8 +23,8 @@
     <key>LSUIElement</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Flow transcribes your voice locally while you hold the dictation key.</string>
-    <key>FlowASRDir</key>
+    <string>OpenFlow transcribes your voice locally while you hold the dictation key.</string>
+    <key>OpenFlowASRDir</key>
     <string>__ASR_DIR__</string>
 </dict>
 </plist>

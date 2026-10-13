@@ -40,7 +40,7 @@ enum FillerFilter {
         return re.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: template)
     }
 
-    /// `Flow --selftest`
+    /// `OpenFlow --selftest`
     static func selfTest() -> Bool {
         let cases: [(String, String?, String)] = [
             ("Um, I think we should, uh, ship it.", "en-US", "I think we should, ship it."),

@@ -1,7 +1,7 @@
 [project]
-name = "flow-asr"
+name = "openflow-asr"
 version = "0.1.0"
-description = "Streaming Nemotron ASR sidecar for Flow dictation"
+description = "Streaming Nemotron ASR sidecar for OpenFlow dictation"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "transformers>=5.13.0",

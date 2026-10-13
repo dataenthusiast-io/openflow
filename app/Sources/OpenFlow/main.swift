@@ -2,16 +2,18 @@ import AppKit
 import ServiceManagement
 
 if CommandLine.arguments.contains("--selftest") {
-    exit(FillerFilter.selfTest() ? 0 : 1)
+    let fillers = FillerFilter.selfTest()
+    let formatting = TextFormatter.selfTest()
+    exit(fillers && formatting ? 0 : 1)
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private enum State { case idle, recording(Date), finishing }
 
-    private let socketPath = NSHomeDirectory() + "/Library/Application Support/Flow/asr.sock"
+    private let socketPath = NSHomeDirectory() + "/Library/Application Support/OpenFlow/asr.sock"
     private lazy var client = ASRClient(socketPath: socketPath)
     private lazy var sidecar = SidecarManager(
-        asrDir: Bundle.main.object(forInfoDictionaryKey: "FlowASRDir") as? String ?? "",
+        asrDir: Bundle.main.object(forInfoDictionaryKey: "OpenFlowASRDir") as? String ?? "",
         socketPath: socketPath
     )
     private let hotkey = HotkeyMonitor()
@@ -31,7 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ note: Notification) {
         setUpMenu()
         setUpClient()
-        AudioCapture.requestPermission { ok in if !ok { NSLog("Flow: microphone permission denied") } }
+        AudioCapture.requestPermission { ok in if !ok { NSLog("OpenFlow: microphone permission denied") } }
         _ = TextInserter.hasAccessibility(prompt: true)
         startHotkey()
 
@@ -49,7 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkey.onChord = { [weak self] in self?.cancelDictation() }
         if !hotkey.start() {
             CGRequestListenEventAccess()  // Input Monitoring prompt; retry until granted
-            setStatus("Grant Input Monitoring to Flow")
+            setStatus("Grant Input Monitoring to OpenFlow")
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.startHotkey() }
         }
     }
@@ -70,7 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try audio.start()
         } catch {
-            NSLog("Flow: audio start failed: %@", error.localizedDescription)
+            NSLog("OpenFlow: audio start failed: %@", error.localizedDescription)
             client.cancel()
             return
         }
@@ -125,16 +127,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.setStatus("ASR: ready (hold right ⌥ to dictate)")
             case .partial(let text, let lang):
                 if case .idle = self.state { return }
-                self.overlay.model.update(text)
+                self.overlay.model.update(self.polish(text, lang: lang ?? self.lang))
                 if let lang { self.overlay.model.lang = lang; self.lang = lang }
             case .final(let text, let lang):
                 if case .finishing = self.state {
                     self.state = .idle
                     self.overlay.hide()
                 }
-                TextInserter.insert(FillerFilter.clean(text, lang: lang ?? self.lang))
+                TextInserter.insert(self.polish(text, lang: lang ?? self.lang))
             case .error(let message):
-                NSLog("Flow: ASR error: %@", message)
+                NSLog("OpenFlow: ASR error: %@", message)
             case .disconnected:
                 self.setStatus("ASR: reconnecting…")
                 if case .recording = self.state { self.cancelDictation() }
@@ -143,6 +145,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.overlay.hide()
             }
         }
+    }
+
+    /// Same cleanup for the live HUD and the paste, so what you see is what gets inserted.
+    private func polish(_ text: String, lang: String?) -> String {
+        TextFormatter.format(FillerFilter.clean(text, lang: lang))
     }
 
     private func scheduleReconnect() {
@@ -167,7 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Open ASR Log", action: #selector(openLog), keyEquivalent: ""))
         menu.addItem(loginItem)
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit Flow", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit OpenFlow", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         for item in menu.items where item.action != nil && item.target == nil && item.action != #selector(NSApplication.terminate(_:)) {
             item.target = self
         }
@@ -190,7 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return true
         }
         image.isTemplate = true
-        image.accessibilityDescription = "Flow"
+        image.accessibilityDescription = "OpenFlow"
         return image
     }
 
@@ -216,7 +223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try SMAppService.mainApp.register()
             }
         } catch {
-            NSLog("Flow: launch at login failed: %@", error.localizedDescription)
+            NSLog("OpenFlow: launch at login failed: %@", error.localizedDescription)
         }
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
     }

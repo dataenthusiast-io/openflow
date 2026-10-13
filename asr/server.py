@@ -1,4 +1,4 @@
-"""Flow ASR sidecar: streaming Nemotron 3.5 over a Unix socket.
+"""OpenFlow ASR sidecar: streaming Nemotron 3.5 over a Unix socket.
 
 Client -> server frames: 1 byte type + 4 byte big-endian length + payload
     b"S"  start session (payload: optional language, e.g. b"de-DE"; empty = server default)
@@ -30,12 +30,12 @@ from transformers import AutoModelForRNNT, AutoProcessor
 from transformers.generation.streamers import BaseStreamer
 
 MODEL_ID = "nvidia/nemotron-3.5-asr-streaming-0.6b"
-DEFAULT_SOCKET = os.path.expanduser("~/Library/Application Support/Flow/asr.sock")
+DEFAULT_SOCKET = os.path.expanduser("~/Library/Application Support/OpenFlow/asr.sock")
 LANG_TAG = re.compile(r"\s*<([a-z]{2,3}-[A-Z]{2})>")
 # Trailing silence that pushes the last partial chunk + right context through the encoder.
 FLUSH_SECONDS = 1.0
 
-log = logging.getLogger("flow-asr")
+log = logging.getLogger("openflow-asr")
 
 
 class LiveStreamer(BaseStreamer):

@@ -15,7 +15,7 @@ final class ASRClient {
     private(set) var isConnected = false
 
     private var fd: Int32 = -1
-    private let writeQueue = DispatchQueue(label: "flow.asr.write")
+    private let writeQueue = DispatchQueue(label: "openflow.asr.write")
 
     init(socketPath: String) { self.socketPath = socketPath }
 
