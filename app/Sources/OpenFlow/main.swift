@@ -119,7 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         audio.warmSeconds = Settings.keepMicWarm ? 30 : 0
         do {
-            try audio.begin(device: AudioDevices.resolve(Settings.microphone)?.id)
+            try audio.begin(device: AudioDevices.resolve(Settings.microphone))
         } catch {
             NSLog("OpenFlow: audio start failed: %@", error.localizedDescription)
             client.cancel()
@@ -389,6 +389,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSLog("OpenFlow: launch at login failed: %@", error.localizedDescription)
         }
     }
+}
+
+if CommandLine.arguments.contains("--mictest") {
+    runMicTest()
+    exit(0)
 }
 
 let app = NSApplication.shared
