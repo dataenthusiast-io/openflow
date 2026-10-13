@@ -42,9 +42,20 @@ no password prompt and no trust settings, and `build-app.sh` uses it automatical
 Remove it with `scripts/make-cert.sh --remove`.
 
 ## Usage
-- Hold right ⌥ for at least 0.25 s and talk. The mic stays open 300 ms after release, so the last
-  syllable isn't clipped.
+- **Hold right ⌥** and talk. The mic stays open 300 ms after release, so the last syllable isn't clipped.
+- **Double-tap right ⌥** for hands-free mode (a lock appears in the HUD); press it once more to finish.
+- **Esc** cancels a dictation; nothing is pasted.
 - Right ⌥ plus another key (e.g. ⌥L for @) still works as a normal shortcut and cancels the dictation.
+
+The menu bar menu has:
+- **Paste Last Dictation / Recent Dictations:** paste again, e.g. if the cursor was in the wrong field.
+- **Language:** detect automatically, or pin Deutsch / English.
+- **Microphone:** "Automatic" uses the system input but skips Bluetooth headsets in favor of the
+  built-in mic. Opening a headset mic switches it to low-quality call audio (worse transcripts, mono
+  music) and takes long enough to clip your first word. You can also pick any device explicitly.
+- **Keep Mic Ready for 30 s:** after a dictation the mic stays open briefly, so the next one starts
+  instantly with 300 ms of pre-roll. The orange mic indicator stays on during that time.
+- **Sounds**, **Add Space After Text**, **Launch at Login**.
 - "um" is only treated as a filler in English, because it's a real German word ("um zehn Uhr").
 
 ### Formatting while you speak
@@ -60,18 +71,24 @@ with no added latency:
 ## How it works
 ```
 OpenFlow.app (Swift, menu bar)                    asr/server.py (Python sidecar)
- HotkeyMonitor  CGEventTap, right ⌥
- AudioCapture   AVAudioEngine → 16 kHz Int16 ──▶ Unix socket ──▶ Nemotron cache-aware streaming
+ HotkeyMonitor  CGEventTap: right ⌥, Esc
+ AudioCapture   AVAudioEngine → 16 kHz Int16 ──▶ Unix socket ──▶ Nemotron, live decoder (320 ms)
+ AudioDevices   CoreAudio input selection                         + final decoder (1.12 s)
  OverlayPanel   SwiftUI + Liquid Glass        ◀── JSON partials/final + language tag
  FillerFilter   regex cleanup
  TextFormatter  lists + layout commands, live
  TextInserter   pasteboard swap + ⌘V
  SidecarManager spawns `uv run server.py`, restarts on crash
 ```
-- Audio is cut into 320 ms chunks (`--lookahead 3`); each takes ~26 ms on an M5 Pro (≈ 10× real time).
-  The final text arrives ~100 ms after the mic closes. `--lookahead 6` / `13` give 560 ms / 1.12 s
-  chunks, which are slightly more accurate but slower to display.
-- `--language de-DE` pins the language instead of `auto`.
+- **Two decoders, one pass each.** The HUD uses 320 ms chunks (`--lookahead 3`, ~20 ms compute per
+  chunk on an M5 Pro). In parallel, a second instance with 1.12 s of right context (`--final-lookahead 13`)
+  produces the text that gets pasted. NVIDIA reports lower error rates at the longer context
+  (German FLEURS 8.9 → 8.2 % WER). Both run as streams, so the final text still arrives ~120 ms after the
+  mic closes. `--final-lookahead 3` switches back to a single decoder.
+- The model runs in fp16 (same transcripts as fp32 in our tests, ~25 % faster); `--fp32` to compare.
+  The two instances share the GPU chunk by chunk: generate() keeps streaming state on the model object,
+  and MPS crashes when two threads run kernels at once.
+- `--language de-DE` pins the language for every session; the app's Language menu does the same per dictation.
 - The socket protocol is documented in `asr/server.py`; the app talks to
   `~/Library/Application Support/OpenFlow/asr.sock` and reuses a server you started by hand.
 - The app starts the sidecar with `HF_HUB_OFFLINE=1`, so run `bench.py` once to cache the model.

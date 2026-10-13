@@ -23,6 +23,7 @@ def main():
     ap.add_argument("wav")
     ap.add_argument("--socket", default=DEFAULT_SOCKET)
     ap.add_argument("--fast", action="store_true", help="send without real-time pacing")
+    ap.add_argument("--language", default="", help='pin a locale, e.g. de-DE (default: server setting)')
     args = ap.parse_args()
 
     with wave.open(args.wav, "rb") as w:
@@ -32,7 +33,7 @@ def main():
     s.connect(args.socket)
     f = s.makefile("r", encoding="utf-8")
     print(json.loads(f.readline()))
-    t_end = [None]
+    t_end = [time.perf_counter()]
     sent = [0.0]  # seconds of audio sent so far
     done = threading.Event()
 
@@ -48,7 +49,7 @@ def main():
             print(f"[{el:5.2f}s audio={sent[0]:4.1f}s] {msg.get('lang')}  {msg.get('text', msg)}")
 
     threading.Thread(target=reader, daemon=True).start()
-    s.sendall(frame(b"S"))
+    s.sendall(frame(b"S", args.language.encode()))
     step = 1600 * 2  # 100 ms of int16 audio, like an AVAudioEngine tap
     for i in range(0, len(pcm), step):
         s.sendall(frame(b"A", pcm[i : i + step]))

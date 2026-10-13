@@ -7,8 +7,9 @@ if CommandLine.arguments.contains("--selftest") {
     exit(fillers && formatting ? 0 : 1)
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    private enum State { case idle, recording(Date), finishing }
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    /// recording: key held (or locked hands-free). tapPending: a short tap that may become a double-tap.
+    private enum State { case idle, recording(Date, locked: Bool), tapPending, finishing }
 
     private let socketPath = NSHomeDirectory() + "/Library/Application Support/OpenFlow/asr.sock"
     private lazy var client = ASRClient(socketPath: socketPath)
@@ -26,11 +27,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Keeps the mic open briefly after release: people let go while the last syllable is still trailing.
     private let releaseTail: TimeInterval = 0.3
     private var pendingTail: DispatchWorkItem?
+    /// A tap shorter than this is not a dictation; a second press right after it locks hands-free mode.
+    private let tapThreshold: TimeInterval = 0.25
+    private let doubleTapWindow: TimeInterval = 0.35
+    private var pendingTap: DispatchWorkItem?
+    private var history: [String] = []
+    private var statusText = "ASR: starting…"
     private var statusItem: NSStatusItem!
-    private let statusLine = NSMenuItem(title: "ASR: starting…", action: nil, keyEquivalent: "")
-    private let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        Settings.registerDefaults()
         setUpMenu()
         setUpClient()
         AudioCapture.requestPermission { ok in if !ok { NSLog("OpenFlow: microphone permission denied") } }
@@ -41,19 +47,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scheduleReconnect()
     }
 
-    func applicationWillTerminate(_ note: Notification) { sidecar.stop() }
+    func applicationWillTerminate(_ note: Notification) {
+        audio.shutdown()
+        sidecar.stop()
+    }
 
     // MARK: - Hotkey → audio → ASR
 
     private func startHotkey() {
-        hotkey.onPress = { [weak self] in self?.beginDictation() }
-        hotkey.onRelease = { [weak self] in self?.endDictation() }
+        hotkey.onPress = { [weak self] in self?.keyPressed() }
+        hotkey.onRelease = { [weak self] in self?.keyReleased() }
         hotkey.onChord = { [weak self] in self?.cancelDictation() }
+        hotkey.onEscape = { [weak self] in self?.cancelDictation() }
+        hotkey.escapeIsActive = { [weak self] in
+            switch self?.state {
+            case .recording, .tapPending: return true
+            default: return false
+            }
+        }
         if !hotkey.start() {
             CGRequestListenEventAccess()  // Input Monitoring prompt; retry until granted
-            setStatus("Grant Input Monitoring to OpenFlow")
+            setStatus("Grant Accessibility and Input Monitoring to OpenFlow")
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.startHotkey() }
         }
+    }
+
+    private func keyPressed() {
+        switch state {
+        case .tapPending:  // double-tap: keep the running recording and lock it
+            pendingTap?.cancel()
+            pendingTap = nil
+            state = .recording(Date(), locked: true)
+            overlay.model.locked = true
+            play("Morse")
+        case .recording(_, locked: true):  // press again to finish hands-free mode
+            endDictation()
+        case .recording:
+            break
+        case .idle, .finishing:
+            beginDictation()
+        }
+    }
+
+    private func keyReleased() {
+        guard case .recording(let started, locked: false) = state else { return }
+        guard Date().timeIntervalSince(started) >= tapThreshold else {
+            state = .tapPending  // keep recording until we know whether a second press follows
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, case .tapPending = self.state else { return }
+                self.cancelDictation()
+            }
+            pendingTap = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + doubleTapWindow, execute: work)
+            return
+        }
+        endDictation()
     }
 
     private func beginDictation() {
@@ -64,31 +112,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         flushTail()
         lang = nil
         session += 1
-        client.start()
+        client.start(language: Settings.language == "auto" ? "" : Settings.language)
         audio.onAudio = { [client] pcm in client.sendAudio(pcm) }
         audio.onLevel = { [overlay] level in
             DispatchQueue.main.async { overlay.model.level = 0.5 * overlay.model.level + 0.5 * level }  // smooth jitter
         }
+        audio.warmSeconds = Settings.keepMicWarm ? 30 : 0
         do {
-            try audio.start()
+            try audio.begin(device: AudioDevices.resolve(Settings.microphone)?.id)
         } catch {
             NSLog("OpenFlow: audio start failed: %@", error.localizedDescription)
             client.cancel()
             return
         }
-        state = .recording(Date())
+        state = .recording(Date(), locked: false)
         overlay.show()
+        play("Tink")
     }
 
     private func endDictation() {
-        guard case .recording(let started) = state else { return }
-        if Date().timeIntervalSince(started) < 0.25 {  // accidental tap
-            audio.stop()
-            client.cancel()
-            state = .idle
-            overlay.hide()
-            return
-        }
         state = .finishing
         overlay.model.finishing = true
         let tail = DispatchWorkItem { [weak self] in self?.flushTail() }
@@ -107,13 +149,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let tail = pendingTail else { return }
         tail.cancel()
         pendingTail = nil
-        audio.stop()
+        audio.finish()
         client.end()
     }
 
     private func cancelDictation() {
-        guard case .recording = state else { return }
-        audio.stop()
+        switch state {
+        case .recording, .tapPending: break
+        default: return
+        }
+        pendingTap?.cancel()
+        pendingTap = nil
+        audio.finish()
         client.cancel()
         state = .idle
         overlay.hide()
@@ -124,7 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             switch event {
             case .ready:
-                self.setStatus("ASR: ready (hold right ⌥ to dictate)")
+                self.setStatus("ASR: ready")
             case .partial(let text, let lang):
                 if case .idle = self.state { return }
                 self.overlay.model.update(self.polish(text, lang: lang ?? self.lang))
@@ -134,12 +181,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.state = .idle
                     self.overlay.hide()
                 }
-                TextInserter.insert(self.polish(text, lang: lang ?? self.lang))
+                self.deliver(self.polish(text, lang: lang ?? self.lang))
             case .error(let message):
                 NSLog("OpenFlow: ASR error: %@", message)
             case .disconnected:
                 self.setStatus("ASR: reconnecting…")
-                if case .recording = self.state { self.cancelDictation() }
+                self.cancelDictation()
                 self.flushTail()
                 self.state = .idle
                 self.overlay.hide()
@@ -150,6 +197,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Same cleanup for the live HUD and the paste, so what you see is what gets inserted.
     private func polish(_ text: String, lang: String?) -> String {
         TextFormatter.format(FillerFilter.clean(text, lang: lang))
+    }
+
+    private func deliver(_ text: String) {
+        guard !text.isEmpty else { return }
+        play("Pop")
+        history.insert(text, at: 0)
+        history = Array(history.prefix(10))
+        paste(text)
+    }
+
+    private func paste(_ text: String) {
+        let needsSpace = Settings.trailingSpace && !(text.last?.isWhitespace ?? true)
+        TextInserter.insert(needsSpace ? text + " " : text)
+    }
+
+    private func play(_ name: String) {
+        guard Settings.sounds, let sound = NSSound(named: NSSound.Name(name))?.copy() as? NSSound else { return }
+        sound.volume = 0.25
+        sound.play()
     }
 
     private func scheduleReconnect() {
@@ -168,18 +234,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = Self.menuBarIcon()
         let menu = NSMenu()
-        menu.addItem(statusLine)
+        menu.delegate = self
+        statusItem.menu = menu
+    }
+
+    /// Rebuilt on every open so device list, history and checkmarks are current.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let status = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        menu.addItem(status)
+        menu.addItem(NSMenuItem(title: "Hold right ⌥ to dictate · double-tap for hands-free · Esc cancels", action: nil, keyEquivalent: ""))
+        menu.items.last?.isEnabled = false
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Restart ASR", action: #selector(restartASR), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Open ASR Log", action: #selector(openLog), keyEquivalent: ""))
-        menu.addItem(loginItem)
+
+        let last = item("Paste Last Dictation", #selector(pasteHistory(_:)))
+        last.tag = 0
+        last.isEnabled = !history.isEmpty
+        menu.addItem(last)
+        if history.count > 1 {
+            let recent = NSMenu()
+            for (i, text) in history.enumerated() {
+                let flat = text.replacingOccurrences(of: "\n", with: " ⏎ ")
+                let entry = item(flat.count > 60 ? String(flat.prefix(60)) + "…" : flat, #selector(pasteHistory(_:)))
+                entry.tag = i
+                entry.toolTip = text
+                recent.addItem(entry)
+            }
+            menu.addItem(submenu("Recent Dictations", recent))
+        }
+        menu.addItem(.separator())
+
+        let languages = NSMenu()
+        for (code, name) in [("auto", "Detect Automatically"), ("de-DE", "Deutsch"), ("en-US", "English")] {
+            let entry = item(name, #selector(chooseLanguage(_:)))
+            entry.representedObject = code
+            entry.state = Settings.language == code ? .on : .off
+            languages.addItem(entry)
+        }
+        menu.addItem(submenu("Language", languages))
+
+        let mics = NSMenu()
+        let auto = AudioDevices.resolve("auto")
+        for (code, name) in [("auto", "Automatic (avoid Bluetooth)" + (auto.map { " – \($0.name)" } ?? "")),
+                             ("default", "System Default")] {
+            let entry = item(name, #selector(chooseMicrophone(_:)))
+            entry.representedObject = code
+            entry.state = Settings.microphone == code ? .on : .off
+            mics.addItem(entry)
+        }
+        mics.addItem(.separator())
+        for device in AudioDevices.inputs() {
+            let entry = item(device.name + (device.isBluetooth ? " (Bluetooth)" : ""), #selector(chooseMicrophone(_:)))
+            entry.representedObject = device.uid
+            entry.state = Settings.microphone == device.uid ? .on : .off
+            mics.addItem(entry)
+        }
+        menu.addItem(submenu("Microphone", mics))
+
+        menu.addItem(toggle("Sounds", Settings.sounds, #selector(toggleSounds)))
+        menu.addItem(toggle("Add Space After Text", Settings.trailingSpace, #selector(toggleTrailingSpace)))
+        menu.addItem(toggle("Keep Mic Ready for 30 s", Settings.keepMicWarm, #selector(toggleKeepMicWarm)))
+        menu.addItem(toggle("Launch at Login", SMAppService.mainApp.status == .enabled, #selector(toggleLogin)))
+        menu.addItem(.separator())
+        menu.addItem(item("Restart ASR", #selector(restartASR)))
+        menu.addItem(item("Open ASR Log", #selector(openLog)))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit OpenFlow", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        for item in menu.items where item.action != nil && item.target == nil && item.action != #selector(NSApplication.terminate(_:)) {
-            item.target = self
-        }
-        loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        statusItem.menu = menu
+    }
+
+    private func item(_ title: String, _ action: Selector) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        i.target = self
+        return i
+    }
+
+    private func toggle(_ title: String, _ on: Bool, _ action: Selector) -> NSMenuItem {
+        let i = item(title, action)
+        i.state = on ? .on : .off
+        return i
+    }
+
+    private func submenu(_ title: String, _ sub: NSMenu) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        i.submenu = sub
+        return i
     }
 
     /// Template version of the app icon's five-bar waveform.
@@ -202,8 +341,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setStatus(_ s: String) {
-        statusLine.title = s
+        statusText = s
         statusItem.button?.appearsDisabled = !client.isConnected
+    }
+
+    @objc private func pasteHistory(_ sender: NSMenuItem) {
+        guard history.indices.contains(sender.tag) else { return }
+        let text = history[sender.tag]
+        // let the menu close so focus is back in the target field
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.paste(text) }
+    }
+
+    @objc private func chooseLanguage(_ sender: NSMenuItem) {
+        Settings.language = sender.representedObject as? String ?? "auto"
+    }
+
+    @objc private func chooseMicrophone(_ sender: NSMenuItem) {
+        Settings.microphone = sender.representedObject as? String ?? "auto"
+        audio.shutdown()  // reopen on the new device next time
+    }
+
+    @objc private func toggleSounds() { Settings.sounds.toggle() }
+    @objc private func toggleTrailingSpace() { Settings.trailingSpace.toggle() }
+
+    @objc private func toggleKeepMicWarm() {
+        Settings.keepMicWarm.toggle()
+        if !Settings.keepMicWarm, case .idle = state { audio.shutdown() }
     }
 
     @objc private func restartASR() {
@@ -225,7 +388,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             NSLog("OpenFlow: launch at login failed: %@", error.localizedDescription)
         }
-        loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
     }
 }
 

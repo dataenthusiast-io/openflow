@@ -11,6 +11,8 @@ final class OverlayModel: ObservableObject {
     @Published var lang: String?
     @Published var level: Float = 0
     @Published var finishing = false
+    /// Hands-free mode (double-tap): recording continues until the next press.
+    @Published var locked = false
 
     private var batchStarted = Date.distantPast
     private static let maxChars = 320
@@ -22,6 +24,7 @@ final class OverlayModel: ObservableObject {
         lang = nil
         level = 0
         finishing = false
+        locked = false
     }
 
     /// Partials arrive once per 320 ms chunk, as several tokens a few ms apart. Tokens within one
@@ -118,6 +121,7 @@ private struct OverlayView: View {
         .animation(.spring(duration: 0.4, bounce: 0.25), value: model.lang)
         .animation(.smooth(duration: 0.3), value: model.text)
         .animation(.smooth(duration: 0.3), value: model.finishing)
+        .animation(.spring(duration: 0.35, bounce: 0.3), value: model.locked)
     }
 
     @ViewBuilder private var content: some View {
@@ -126,6 +130,12 @@ private struct OverlayView: View {
                 HStack(spacing: 12) {
                     LevelBars(level: model.level, finishing: model.finishing)
                     transcript
+                    if model.locked && !model.finishing {
+                        Image(systemName: "lock.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .transition(.scale.combined(with: .opacity))
+                    }
                 }
                 .padding(.leading, 16)
                 .padding(.trailing, 20)
@@ -149,7 +159,7 @@ private struct OverlayView: View {
 
     @ViewBuilder private var transcript: some View {
         if model.text.isEmpty {
-            Text(model.finishing ? "…" : "Listening…")
+            Text(model.finishing ? "…" : model.locked ? "Hands-free · press ⌥ to finish" : "Listening…")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(.secondary)
                 .transition(.opacity)
