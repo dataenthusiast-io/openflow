@@ -53,8 +53,10 @@ The menu bar menu has:
 - **Microphone:** "Automatic" uses the system input but skips Bluetooth headsets in favor of the
   built-in mic. Opening a headset mic switches it to low-quality call audio (worse transcripts, mono
   music) and takes long enough to clip your first word. You can also pick any device explicitly.
-- **Keep Mic Ready for 30 s:** after a dictation the mic stays open briefly, so the next one starts
-  instantly with 300 ms of pre-roll. The orange mic indicator stays on during that time.
+- **Keep Mic Ready for 30 s** (off by default): after a dictation the mic stays open briefly, so the
+  next one starts instantly with 300 ms of pre-roll. A closed mic needs ~100–200 ms to deliver audio,
+  which can clip a first word spoken together with the key press. With this off, the orange mic
+  indicator is only on while you dictate.
 - **Sounds**, **Add Space After Text**, **Launch at Login**.
 - "um" is only treated as a filler in English, because it's a real German word ("um zehn Uhr").
 

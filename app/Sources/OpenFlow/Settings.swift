@@ -10,7 +10,7 @@ enum Settings {
             "microphone": "auto",
             "sounds": true,
             "trailingSpace": true,
-            "keepMicWarm": true,
+            "keepMicWarm": false,  // the orange mic dot lingering after dictating looks like spying
         ])
     }
 
