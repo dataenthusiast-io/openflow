@@ -362,15 +362,14 @@ final class Transcriber {
     }
 }
 
-/// Markdown files in ~/Documents/OpenFlow/Transcripts, rewritten atomically after every finished
-/// segment: a crash loses at most the segment being spoken.
+/// Markdown files in `Settings.transcriptsFolder`, rewritten atomically after every finished
+/// segment: a crash loses at most the segment being spoken. A transcript stays in the folder it
+/// started in, even if the setting changes meanwhile.
 enum TranscriptStore {
-    static let folder = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Documents/OpenFlow/Transcripts", isDirectory: true)
-
     static func save(_ model: TranscriptModel) throws -> URL {
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let url = folder.appendingPathComponent(format(model.started, "yyyy-MM-dd HH-mm") + ".md")
+        let url = model.fileURL ?? Settings.transcriptsFolder
+            .appendingPathComponent(format(model.started, "yyyy-MM-dd HH-mm") + ".md")
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try markdown(model).write(to: url, atomically: true, encoding: .utf8)
         return url
     }

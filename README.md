@@ -55,7 +55,7 @@ Remove it with `scripts/make-cert.sh --remove`.
 - Right ⌥ plus another key (e.g. ⌥L for @) still works as a normal shortcut and cancels the dictation.
 
 The menu bar menu has:
-- **Start / Stop Transcription**, **Open Transcripts Folder**.
+- **Start / Stop Transcription**, **Open Transcripts Folder**, **Change Transcripts Folder…**
 - **Hands-Free Dictation:** dictate without holding the key (a lock appears in the HUD); press right ⌥
   once to finish.
 - **Paste Last Dictation / Recent Dictations:** paste again, e.g. if the cursor was in the wrong field.
@@ -93,9 +93,9 @@ speaker detection, and nothing leaves the Mac).
   It never translates or answers what was said, and an output much shorter or longer than the input is
   discarded. It won a 14-case German/English benchmark against Qwen 3.5 2B/4B, Ministral 3 3B and
   LFM 2.5 1.2B.
-- The transcript is written to `~/Documents/OpenFlow/Transcripts/YYYY-MM-DD HH-MM.md` after every
-  finished segment (atomic rewrite), so a crash loses at most the segment being spoken. No audio is
-  stored.
+- The transcript is written to `YYYY-MM-DD HH-MM.md` in the transcripts folder
+  (`~/Documents/OpenFlow/Transcripts` unless changed in the menu) after every finished segment (atomic
+  rewrite), so a crash loses at most the segment being spoken. No audio is stored.
 - The panel's footer reminds you: always get consent when transcribing others.
 - Toggle from scripts or Shortcuts: post the distributed notification `dev.openflow.toggleTranscription`.
 

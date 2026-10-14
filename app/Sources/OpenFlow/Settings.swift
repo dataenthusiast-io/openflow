@@ -42,4 +42,13 @@ enum Settings {
         get { d.bool(forKey: "keepMicWarm") }
         set { d.set(newValue, forKey: "keepMicWarm") }
     }
+
+    static let defaultTranscriptsFolder = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Documents/OpenFlow/Transcripts", isDirectory: true)
+
+    /// Where transcription mode writes its Markdown files.
+    static var transcriptsFolder: URL {
+        get { d.string(forKey: "transcriptsFolder").map { URL(fileURLWithPath: $0, isDirectory: true) } ?? defaultTranscriptsFolder }
+        set { d.set(newValue.path, forKey: "transcriptsFolder") }
+    }
 }

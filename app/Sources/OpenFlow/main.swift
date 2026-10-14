@@ -305,6 +305,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(item("Hands-Free Dictation", #selector(startHandsFree)))
         }
         menu.addItem(item("Open Transcripts Folder", #selector(openTranscripts)))
+        let folder = item("Change Transcripts Folder…", #selector(chooseTranscriptsFolder))
+        folder.toolTip = Settings.transcriptsFolder.path
+        menu.addItem(folder)
         menu.addItem(.separator())
 
         let last = item("Paste Last Dictation", #selector(pasteHistory(_:)))
@@ -429,8 +432,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openTranscripts() {
-        try? FileManager.default.createDirectory(at: TranscriptStore.folder, withIntermediateDirectories: true)
-        NSWorkspace.shared.open(TranscriptStore.folder)
+        try? FileManager.default.createDirectory(at: Settings.transcriptsFolder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(Settings.transcriptsFolder)
+    }
+
+    @objc private func chooseTranscriptsFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Transcripts Folder"
+        panel.message = "New transcripts are saved here as Markdown."
+        panel.prompt = "Choose"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = Settings.transcriptsFolder
+        NSApp.activate()  // a menu bar app's panel would otherwise open behind other windows
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Settings.transcriptsFolder = url
     }
 
     @objc private func chooseLanguage(_ sender: NSMenuItem) {
