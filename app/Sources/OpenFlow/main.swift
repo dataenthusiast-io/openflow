@@ -9,7 +9,8 @@ if CommandLine.arguments.contains("--selftest") {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// recording: key held (or locked hands-free). tapPending: a short tap that may become a double-tap.
-    private enum State { case idle, recording(Date, locked: Bool), tapPending, finishing }
+    /// transcribing: transcription mode (double-tap); dictation is off until it stops.
+    private enum State { case idle, recording(Date, locked: Bool), tapPending, finishing, transcribing }
 
     private let socketPath = NSHomeDirectory() + "/Library/Application Support/OpenFlow/asr.sock"
     private lazy var client = ASRClient(socketPath: socketPath)
@@ -20,10 +21,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let hotkey = HotkeyMonitor()
     private let audio = AudioCapture()
     private let overlay = OverlayPanel()
+    private lazy var transcriber = Transcriber(client: client, socketPath: socketPath, mic: audio)
+    private lazy var transcriptPanel = TranscriptPanel(model: transcriber.model)
 
     private var state = State.idle
     private var lang: String?
     private var session = 0
+    /// ASR session of the current dictation; events from older sessions are ignored.
+    private var dictationSession = 0
+    private var lastTranscribePress: Date?
     /// Keeps the mic open briefly after release: people let go while the last syllable is still trailing.
     private let releaseTail: TimeInterval = 0.3
     private var pendingTail: DispatchWorkItem?
@@ -45,9 +51,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if !client.connect() { sidecar.start() }
         scheduleReconnect()
+
+        // Scripts and Shortcuts can toggle transcription mode (see README).
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("dev.openflow.toggleTranscription"), object: nil, queue: .main
+        ) { [weak self] _ in self?.toggleTranscription() }
     }
 
     func applicationWillTerminate(_ note: Notification) {
+        if case .transcribing = state {
+            transcriber.stop()
+            transcriber.finish()  // no time to wait for the last finals: save what's there
+        }
         audio.shutdown()
         sidecar.stop()
     }
@@ -74,12 +89,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func keyPressed() {
         switch state {
-        case .tapPending:  // double-tap: keep the running recording and lock it
-            pendingTap?.cancel()
-            pendingTap = nil
-            state = .recording(Date(), locked: true)
-            overlay.model.locked = true
-            play("Morse")
+        case .tapPending:  // double-tap: drop the tap's dictation and start transcription mode
+            cancelDictation()
+            startTranscription()
+        case .transcribing:  // double-tap again to stop
+            if let last = lastTranscribePress, Date().timeIntervalSince(last) < doubleTapWindow {
+                lastTranscribePress = nil
+                stopTranscription()
+            } else {
+                lastTranscribePress = Date()
+            }
         case .recording(_, locked: true):  // press again to finish hands-free mode
             endDictation()
         case .recording:
@@ -112,7 +131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         flushTail()
         lang = nil
         session += 1
-        client.start(language: Settings.language == "auto" ? "" : Settings.language)
+        dictationSession = client.start(language: Settings.language == "auto" ? "" : Settings.language)
         audio.onAudio = { [client] pcm in client.sendAudio(pcm) }
         audio.onLevel = { [overlay] level in
             DispatchQueue.main.async { overlay.model.level = 0.5 * overlay.model.level + 0.5 * level }  // smooth jitter
@@ -144,6 +163,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func startTranscription() {
+        guard client.isConnected else {
+            setStatus("ASR not ready yet")
+            return
+        }
+        flushTail()
+        do {
+            try transcriber.start()
+        } catch {
+            NSLog("OpenFlow: transcription start failed: %@", error.localizedDescription)
+            return
+        }
+        state = .transcribing
+        lastTranscribePress = nil
+        transcriptPanel.onStop = { [weak self] in self?.stopTranscription() }
+        transcriptPanel.show()
+        play("Morse")
+    }
+
+    private func stopTranscription() {
+        guard case .transcribing = state else { return }
+        transcriber.stop()
+        state = .idle
+        play("Pop")
+    }
+
     /// Stops the post-release tail capture and asks the server for the final transcript.
     private func flushTail() {
         guard let tail = pendingTail else { return }
@@ -169,19 +214,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func setUpClient() {
         client.onEvent = { [weak self] event in
             guard let self else { return }
+            if self.transcriber.handleMain(event) { return }
             switch event {
             case .ready:
                 self.setStatus("ASR: ready")
-            case .partial(let text, let lang):
+            case .partial(let session, let text, let lang):
+                guard session == self.dictationSession else { return }
                 if case .idle = self.state { return }
                 self.overlay.model.update(self.polish(text, lang: lang ?? self.lang))
                 if let lang { self.overlay.model.lang = lang; self.lang = lang }
-            case .final(let text, let lang):
+            case .final(let session, let text, let lang):
+                guard session == self.dictationSession else { return }
                 if case .finishing = self.state {
                     self.state = .idle
                     self.overlay.hide()
                 }
                 self.deliver(self.polish(text, lang: lang ?? self.lang))
+            case .polished:
+                break
             case .error(let message):
                 NSLog("OpenFlow: ASR error: %@", message)
             case .disconnected:
@@ -244,8 +294,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let status = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
-        menu.addItem(NSMenuItem(title: "Hold right ⌥ to dictate · double-tap for hands-free · Esc cancels", action: nil, keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Hold right ⌥ to dictate · double-tap to transcribe · Esc cancels", action: nil, keyEquivalent: ""))
         menu.items.last?.isEnabled = false
+        menu.addItem(.separator())
+
+        if case .transcribing = state {
+            menu.addItem(item("Stop Transcription", #selector(toggleTranscription)))
+        } else {
+            menu.addItem(item("Start Transcription", #selector(toggleTranscription)))
+            menu.addItem(item("Hands-Free Dictation", #selector(startHandsFree)))
+        }
+        menu.addItem(item("Open Transcripts Folder", #selector(openTranscripts)))
         menu.addItem(.separator())
 
         let last = item("Paste Last Dictation", #selector(pasteHistory(_:)))
@@ -352,6 +411,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.paste(text) }
     }
 
+    @objc private func toggleTranscription() {
+        if case .transcribing = state {
+            stopTranscription()
+        } else if case .idle = state {
+            startTranscription()
+        }
+    }
+
+    /// Dictation without holding the key; a single press of right ⌥ finishes it.
+    @objc private func startHandsFree() {
+        guard case .idle = state else { return }
+        beginDictation()
+        guard case .recording = state else { return }
+        state = .recording(Date(), locked: true)
+        overlay.model.locked = true
+    }
+
+    @objc private func openTranscripts() {
+        try? FileManager.default.createDirectory(at: TranscriptStore.folder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(TranscriptStore.folder)
+    }
+
     @objc private func chooseLanguage(_ sender: NSMenuItem) {
         Settings.language = sender.representedObject as? String ?? "auto"
     }
@@ -396,9 +477,16 @@ if CommandLine.arguments.contains("--mictest") {
     exit(0)
 }
 
+if CommandLine.arguments.contains("--systemaudiotest") {
+    runSystemAudioTest()
+    exit(0)
+}
+
 let app = NSApplication.shared
 if CommandLine.arguments.contains("--demo") {
     runOverlayDemo()
+} else if CommandLine.arguments.contains("--transcript-demo") {
+    runTranscriptDemo()
 } else {
     let delegate = AppDelegate()
     app.delegate = delegate

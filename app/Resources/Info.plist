@@ -24,6 +24,8 @@
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>OpenFlow transcribes your voice locally while you hold the dictation key.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>In transcription mode, OpenFlow transcribes what your Mac plays (the other side of a call) locally.</string>
     <key>OpenFlowASRDir</key>
     <string>__ASR_DIR__</string>
 </dict>

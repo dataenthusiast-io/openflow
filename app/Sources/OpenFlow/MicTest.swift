@@ -55,3 +55,28 @@ func runMicTest() {
     for d in devices where !d.name.contains("Teams") { run("\(d.name) (\(d.id))", device: d) }
     try? out.write(toFile: "/tmp/openflow-mictest.txt", atomically: true, encoding: .utf8)
 }
+
+/// `open -n OpenFlow.app --args --systemaudiotest`: tap system audio for 8 s (play something meanwhile)
+/// and report what arrived. Runs with the app's System Audio Recording permission.
+func runSystemAudioTest() {
+    var out = ""
+    let cap = SystemAudioCapture()
+    var chunks = 0, samples = 0
+    var peak: Int16 = 0
+    cap.onAudio = { d in
+        chunks += 1
+        samples += d.count / 2
+        d.withUnsafeBytes { raw in for v in raw.bindMemory(to: Int16.self) where v.magnitude > peak.magnitude { peak = v } }
+    }
+    do {
+        try cap.start()
+        out += cap.details + "\n"
+        RunLoop.main.run(until: Date().addingTimeInterval(8))
+        cap.stop()
+        out += String(format: "%d chunks, %.2f s of audio, peak %d%@\n", chunks, Double(samples) / 16000, Int(peak),
+                      peak == 0 ? " (pure silence: nothing played, or the permission isn't active for this process)" : "")
+    } catch {
+        out += "start failed: \(error.localizedDescription)\n"
+    }
+    try? out.write(toFile: "/tmp/openflow-systemaudiotest.txt", atomically: true, encoding: .utf8)
+}

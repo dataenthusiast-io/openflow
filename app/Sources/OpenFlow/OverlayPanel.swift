@@ -98,7 +98,7 @@ final class OverlayPanel {
     }
 }
 
-private let brand = LinearGradient(
+let brand = LinearGradient(
     colors: [Color(red: 0.36, green: 0.27, blue: 0.96), Color(red: 0.55, green: 0.24, blue: 0.93), Color(red: 0.98, green: 0.36, blue: 0.55)],
     startPoint: .topLeading, endPoint: .bottomTrailing
 )
@@ -220,9 +220,10 @@ private struct RevealRenderer: TextRenderer {
 
 // MARK: - Level bars
 
-private struct LevelBars: View {
+struct LevelBars: View {
     var level: Float
     var finishing: Bool
+    var fill = AnyShapeStyle(brand)
     private static let weights: [Double] = [0.45, 0.8, 1.0, 0.7, 0.4]
 
     var body: some View {
@@ -235,7 +236,7 @@ private struct LevelBars: View {
                         ? 5 + 7 * (0.5 + 0.5 * sin(t * 6 - Double(i) * 0.9))  // "thinking" wave
                         : 5 + 19 * l * Self.weights[i] * (0.75 + 0.25 * sin(t * 9 + Double(i) * 1.3))
                     Capsule()
-                        .fill(finishing ? AnyShapeStyle(.secondary) : AnyShapeStyle(brand))
+                        .fill(finishing ? AnyShapeStyle(.secondary) : fill)
                         .frame(width: 4, height: h)
                 }
             }
@@ -246,7 +247,7 @@ private struct LevelBars: View {
 
 // MARK: - Liquid Glass with a material fallback before macOS 26
 
-private struct GlassGroup<Content: View>: View {
+struct GlassGroup<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View {
         if #available(macOS 26, *) {
@@ -257,7 +258,7 @@ private struct GlassGroup<Content: View>: View {
     }
 }
 
-private extension View {
+extension View {
     @ViewBuilder func glass<S: Shape>(in shape: S, tint: Color? = nil) -> some View {
         if #available(macOS 26, *) {
             glassEffect(tint.map { Glass.regular.tint($0) } ?? .regular, in: shape)

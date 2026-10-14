@@ -11,6 +11,9 @@ text is pasted into whatever field has focus: Claude, Slack, a browser, anything
   badge shows the detected language.
 - **Clean output:** fillers (äh, ähm, öh, hm; um, uh, erm in English) are removed, and your clipboard
   is restored after pasting.
+- **Transcription mode:** double-tap right ⌥ in a meeting. A side panel transcribes **You** (your mic)
+  and **Them** (whatever your Mac plays) and saves Markdown as you go; a small local LLM cleans up
+  each segment.
 
 ## Requirements
 - Apple Silicon Mac, macOS 15+ (macOS 26 for the Liquid Glass look; older versions fall back to a blur material)
@@ -22,6 +25,7 @@ text is pasted into whatever field has focus: Claude, Slack, a browser, anything
 ```bash
 cd asr && uv sync                     # Python 3.12 env: torch, transformers, librosa
 uv run bench.py ../samples/*.wav      # downloads the model (~2.4 GB) once and benchmarks it
+uv run polish.py                      # downloads the transcript-polish LLM (~3 GB) once
 cd ..
 scripts/make-cert.sh                  # once: stable code signature (see below)
 scripts/build-app.sh && open build/OpenFlow.app
@@ -30,6 +34,9 @@ On first launch, grant permissions in **System Settings → Privacy & Security**
 - **Microphone** to capture audio
 - **Accessibility** to paste with ⌘V
 - **Input Monitoring** for the global hotkey
+- **Screen & System Audio Recording → System Audio Recording Only** for "Them" in transcription
+  mode (asked on the first transcription). Until it's granted, macOS delivers silence: the panel's
+  "Them" meter stays flat even while others talk
 
 Quit and reopen OpenFlow after granting them. The menu bar icon has a status line, Restart ASR,
 Open ASR Log and Launch at Login.
@@ -43,11 +50,14 @@ Remove it with `scripts/make-cert.sh --remove`.
 
 ## Usage
 - **Hold right ⌥** and talk. The mic stays open 300 ms after release, so the last syllable isn't clipped.
-- **Double-tap right ⌥** for hands-free mode (a lock appears in the HUD); press it once more to finish.
+- **Double-tap right ⌥** starts transcription mode; double-tap again (or the stop button) to finish.
 - **Esc** cancels a dictation; nothing is pasted.
 - Right ⌥ plus another key (e.g. ⌥L for @) still works as a normal shortcut and cancels the dictation.
 
 The menu bar menu has:
+- **Start / Stop Transcription**, **Open Transcripts Folder**.
+- **Hands-Free Dictation:** dictate without holding the key (a lock appears in the HUD); press right ⌥
+  once to finish.
 - **Paste Last Dictation / Recent Dictations:** paste again, e.g. if the cursor was in the wrong field.
 - **Language:** detect automatically, or pin Deutsch / English.
 - **Microphone:** "Automatic" uses the system input but skips Bluetooth headsets in favor of the
@@ -70,6 +80,25 @@ with no added latency:
   starts a new paragraph.
 - **Layout commands:** "new line" / "neue Zeile" / "Zeilenumbruch" and "new paragraph" / "neuer Absatz".
 
+### Transcription mode
+For meetings: transcribe a stretch of a call without recording the whole thing. With headphones, your
+mic hears only you and the call audio is everyone else, hence **You** and **Them** (no per-person
+speaker detection, and nothing leaves the Mac).
+- The panel sits full height on the right edge of the screen with the mouse; drag its edges to resize
+  (the width is remembered). It takes clicks without pulling focus from the meeting app.
+- Each stream is cut into segments at pauses. A segment appears dimmed while it's being recognized,
+  turns solid when the 1.12 s decoder confirms it, then gets a cleanup pass by
+  [Gemma 4 E2B](https://huggingface.co/mlx-community/gemma-4-e2b-it-4bit) (MLX, ~200 ms): punctuation,
+  stutters, self-corrections, numbers as digits, misheard terms ("pool request" → "pull request").
+  It never translates or answers what was said, and an output much shorter or longer than the input is
+  discarded. It won a 14-case German/English benchmark against Qwen 3.5 2B/4B, Ministral 3 3B and
+  LFM 2.5 1.2B.
+- The transcript is written to `~/Documents/OpenFlow/Transcripts/YYYY-MM-DD HH-MM.md` after every
+  finished segment (atomic rewrite), so a crash loses at most the segment being spoken. No audio is
+  stored.
+- The panel's footer reminds you: always get consent when transcribing others.
+- Toggle from scripts or Shortcuts: post the distributed notification `dev.openflow.toggleTranscription`.
+
 ## How it works
 ```
 OpenFlow.app (Swift, menu bar)                    asr/server.py (Python sidecar)
@@ -81,6 +110,10 @@ OpenFlow.app (Swift, menu bar)                    asr/server.py (Python sidecar)
  TextFormatter  lists + layout commands, live
  TextInserter   pasteboard swap + ⌘V
  SidecarManager spawns `uv run server.py`, restarts on crash
+ Transcriber    transcription mode: segments,  ──▶ 2nd connection, 2nd decoder set ("Them")
+                Markdown store                 ──▶ polish.py: Gemma 4 E2B via MLX
+ SystemAudioCapture  Core Audio process tap
+ TranscriptPanel     side panel
 ```
 - **Two decoders, one pass each.** The HUD uses 320 ms chunks (`--lookahead 3`, ~20 ms compute per
   chunk on an M5 Pro). In parallel, a second instance with 1.12 s of right context (`--final-lookahead 13`)
@@ -88,9 +121,16 @@ OpenFlow.app (Swift, menu bar)                    asr/server.py (Python sidecar)
   (German FLEURS 8.9 → 8.2 % WER). Both run as streams, so the final text still arrives ~120 ms after the
   mic closes. `--final-lookahead 3` switches back to a single decoder.
 - The model runs in fp16 (same transcripts as fp32 in our tests, ~25 % faster); `--fp32` to compare.
-  The two instances share the GPU chunk by chunk: generate() keeps streaming state on the model object,
-  and MPS crashes when two threads run kernels at once.
+  The instances share the GPU chunk by chunk: generate() keeps streaming state on the model object,
+  and Metal asserts when two threads use the GPU at once (that includes model loads and the MLX
+  polish model). Each decoder serves one session at a time; a new session waits for the previous one
+  to flush.
+- Transcription mode's system audio runs concurrently with the mic, so it gets a second decoder set
+  (loaded on first use, ~2.4 GB). With the polish model, transcription mode uses ~8 GB of GPU memory.
 - `--language de-DE` pins the language for every session; the app's Language menu does the same per dictation.
+- Output is limited to Latin script. In auto mode the language tag only arrives at the end of the first
+  sentence, and until then the first words could come out in Devanagari, Hebrew or CJK (80 % of the
+  vocabulary). `--no-latin-only` lifts the limit, for Greek, Russian and other scripts.
 - The socket protocol is documented in `asr/server.py`; the app talks to
   `~/Library/Application Support/OpenFlow/asr.sock` and reuses a server you started by hand.
 - The app starts the sidecar with `HF_HUB_OFFLINE=1`, so run `bench.py` once to cache the model.
@@ -104,6 +144,8 @@ OpenFlow.app (Swift, menu bar)                    asr/server.py (Python sidecar)
 | `build/OpenFlow.app/Contents/MacOS/OpenFlow --selftest` | Filler-filter and formatter test cases |
 | `open -n build/OpenFlow.app --args --mictest` | Capture 1 s from each input device, write chunk counts and start latency to `/tmp/openflow-mictest.txt` (runs with the app's mic permission) |
 | `build/OpenFlow.app/Contents/MacOS/OpenFlow --demo` | Loop a fake dictation through the HUD (design work, no mic) |
+| `build/OpenFlow.app/Contents/MacOS/OpenFlow --transcript-demo` | Loop a fake meeting through the transcription panel |
+| `cd asr && uv run polish.py "so the the build is uh twenty percent faster"` | Run the polish LLM on a segment |
 | `swift scripts/make-icon.swift app/Resources/AppIcon.icns` | Regenerate the app icon |
 
 `samples/` holds two clips made with macOS `say` (voices Anna and Samantha).

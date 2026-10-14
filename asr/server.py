@@ -1,15 +1,20 @@
 """OpenFlow ASR sidecar: streaming Nemotron 3.5 over a Unix socket.
 
 Client -> server frames: 1 byte type + 4 byte big-endian length + payload
+    b"C"  choose the decoder set for this connection (payload: b"0", b"1", ...; default 0). A second
+          concurrent audio stream (transcription mode's system audio) needs its own models.
     b"S"  start session (payload: optional language, e.g. b"de-DE"; empty = server default)
     b"A"  audio: 16 kHz mono int16 little-endian PCM
     b"E"  end session: flush and emit final
     b"X"  cancel session: flush silently
-Server -> client: newline-delimited JSON
+    b"P"  polish a transcript segment with the local LLM (payload: JSON {"id": 7, "text": "..."};
+          empty text only loads the model)
+Server -> client: newline-delimited JSON. "session" counts the S frames on this connection from 1.
     {"type": "ready"}
-    {"type": "partial", "text": "...", "lang": "de-DE"}
-    {"type": "final", "text": "...", "lang": "de-DE"}
-    {"type": "error", "message": "..."}
+    {"type": "partial", "session": 3, "text": "...", "lang": "de-DE"}
+    {"type": "final", "session": 3, "text": "...", "lang": "de-DE"}
+    {"type": "polished", "id": 7, "text": "..."}
+    {"type": "error", "session": 3, "message": "..."}
 """
 
 import argparse
@@ -29,9 +34,13 @@ import torch
 from transformers import AutoModelForRNNT, AutoProcessor
 from transformers.generation.streamers import BaseStreamer
 
+from polish import MODEL_ID as POLISH_MODEL, Polisher
+
 MODEL_ID = "nvidia/nemotron-3.5-asr-streaming-0.6b"
 DEFAULT_SOCKET = os.path.expanduser("~/Library/Application Support/OpenFlow/asr.sock")
 LANG_TAG = re.compile(r"\s*<([a-z]{2,3}-[A-Z]{2})>")
+# A letter outside Basic Latin, Latin-1, Latin Extended-A/B and Latin Extended Additional.
+NON_LATIN = re.compile(r"[^\W\d_\u0000-\u024F\u1E00-\u1EFF]")
 
 log = logging.getLogger("openflow-asr")
 
@@ -66,14 +75,21 @@ class Engine:
     result gets pasted. Each needs its own model instance: generate() keeps streaming state on the
     model object, so one instance can't serve two concurrent streams."""
 
-    def __init__(self, device: str, lookahead: int, final_lookahead: int, language: str, dtype: torch.dtype):
+    def __init__(
+        self, device: str, lookahead: int, final_lookahead: int, language: str, dtype: torch.dtype, latin_only: bool
+    ):
         self.device = device
         self.language = language
         self.dtype = dtype
+        self.latin_only = latin_only
+        self.lookahead, self.final_lookahead = lookahead, final_lookahead
+        # Metal asserts when two threads use the GPU at once (decoders, model loads, the polish LLM):
+        # everything takes turns. Decoders hold it per chunk.
+        self.gpu = threading.Lock()
         self.live = self._decoder(lookahead)
         self.final = self._decoder(final_lookahead) if final_lookahead != lookahead else None
-        # MPS segfaults when two threads run the model at once: decoders take turns per chunk.
-        self.gpu = threading.Lock()
+        self.sets = [(self.live, self.final)]
+        self.sets_lock = threading.Lock()
         fe = self.live.feature_extractor
         self.sr, self.hop, self.n_fft = fe.sampling_rate, fe.hop_length, fe.n_fft
         # Trailing silence that pushes the last chunk + right context of the slowest decoder through.
@@ -88,8 +104,26 @@ class Engine:
     def _decoder(self, lookahead: int):
         p = AutoProcessor.from_pretrained(MODEL_ID)
         p.set_num_lookahead_tokens(lookahead)
-        p.model = AutoModelForRNNT.from_pretrained(MODEL_ID, dtype=self.dtype).to(self.device).eval()
+        model = AutoModelForRNNT.from_pretrained(MODEL_ID, dtype=self.dtype)
+        with self.gpu:
+            p.model = model.to(self.device).eval()
+            if self.latin_only:
+                log.info("blocked %d non-Latin tokens", block_non_latin(p))
+        # A new session can start while the previous one's decoder is still flushing; a second
+        # generate() on the same model would overwrite (and then delete) the first one's state.
+        p.in_use = threading.Lock()
         return p
+
+    def decoders(self, index: int):
+        """(live, final) decoders for decoder set `index`, loaded on first use (~2 s, ~2.4 GB fp16)."""
+        if index < len(self.sets):  # don't wait while another connection loads a new set
+            return self.sets[index]
+        with self.sets_lock:
+            while len(self.sets) <= index:
+                final = self._decoder(self.final_lookahead) if self.final_lookahead != self.lookahead else None
+                self.sets.append((self._decoder(self.lookahead), final))
+                log.info("loaded decoder set %d", len(self.sets) - 1)
+            return self.sets[index]
 
     def warm_up(self):
         s = Session(self, self.language, lambda *_: None)
@@ -101,8 +135,9 @@ class Engine:
 class Session:
     """One push-to-talk utterance. Audio is pushed from the socket thread; each decoder pulls it."""
 
-    def __init__(self, engine: Engine, language: str, emit):
+    def __init__(self, engine: Engine, language: str, emit, decoder_set: int = 0):
         self.e = engine
+        self.live, self.final = engine.decoders(decoder_set)
         self.language = language
         self.emit = emit
         self.audio = np.zeros(0, dtype=np.float32)
@@ -112,7 +147,7 @@ class Session:
         self.live_result: tuple[str, str | None] = ("", None)
         self.live_done = threading.Event()
         self.threads = [Thread(target=self._run_live, daemon=True)]
-        if engine.final:
+        if self.final:
             self.threads.append(Thread(target=self._run_final, daemon=True))
         for t in self.threads:
             t.start()
@@ -161,7 +196,7 @@ class Session:
                 audio = self._wait_for(start + p.num_samples_per_audio_chunk)
             finally:
                 self.e.gpu.acquire()
-            if audio is None:
+            if audio is None or self.cancelled:  # free the decoder for the next session right away
                 return
             yield self._features(p, audio[start : start + p.num_samples_per_audio_chunk], False).input_features
             mel_idx += p.num_mel_frames_per_audio_chunk
@@ -169,7 +204,7 @@ class Session:
     def _decode(self, p, on_update=None) -> tuple[str, str | None]:
         """Runs one streaming decoder over the session audio; returns (text, language)."""
         audio = self._wait_for(p.num_samples_first_audio_chunk)
-        if audio is None:
+        if audio is None or self.cancelled:
             return "", None
         with self.e.gpu:
             first = self._features(p, audio[: p.num_samples_first_audio_chunk], True)
@@ -179,7 +214,7 @@ class Session:
 
         def generate():
             try:
-                with self.e.gpu, torch.inference_mode():
+                with p.in_use, self.e.gpu, torch.inference_mode():  # in_use first: never wait on it holding the GPU
                     p.model.generate(
                         **{**first, "input_features": self._feature_stream(p, first_features), "streamer": streamer}
                     )
@@ -210,18 +245,18 @@ class Session:
                 last = (text, lang)
 
         try:
-            self.live_result = self._decode(self.e.live, on_update)
+            self.live_result = self._decode(self.live, on_update)
         except Exception as exc:
             log.exception("live decoder failed")
             self.emit("error", str(exc), None)
         finally:
             self.live_done.set()
-        if not self.e.final and not self.cancelled:
+        if not self.final and not self.cancelled:
             self.emit("final", *self.live_result)
 
     def _run_final(self):
         try:
-            text, lang = self._decode(self.e.final)
+            text, lang = self._decode(self.final)
         except Exception:
             log.exception("final decoder failed, falling back to live transcript")
             text, lang = "", None
@@ -230,6 +265,18 @@ class Session:
             text, lang = self.live_result
         if not self.cancelled:
             self.emit("final", text, lang or self.live_result[1])
+
+
+def block_non_latin(p) -> int:
+    """With auto-detect the language tag only arrives at the end of the first sentence; before that,
+    the first words can come out in another script ("हेलो टीम! Ich schicke…"). 80 % of the vocabulary
+    is non-Latin, so it happens often enough to notice. A large negative output bias rules those
+    tokens out for both the emitted token and the blank decision."""
+    tok = p.tokenizer
+    ids = [i for i in range(len(tok)) if NON_LATIN.search(tok.convert_ids_to_tokens(i))]
+    with torch.no_grad():
+        p.model.joint.head.bias[ids] -= 1e4
+    return len(ids)
 
 
 def clean(raw: str) -> str:
@@ -246,7 +293,7 @@ def recv_exact(conn: socket.socket, n: int) -> bytes | None:
     return bytes(buf)
 
 
-def serve_client(engine: Engine, conn: socket.socket):
+def serve_client(engine: Engine, polisher: Polisher, conn: socket.socket):
     wlock = threading.Lock()
 
     def send(msg: dict):
@@ -256,33 +303,48 @@ def serve_client(engine: Engine, conn: socket.socket):
             except OSError:
                 pass
 
-    def emit(kind, text, lang):
-        if kind == "error":
-            send({"type": "error", "message": text})
-        else:
-            send({"type": kind, "text": text, "lang": lang})
+    def emitter(sid: int):
+        def emit(kind, text, lang):
+            if kind == "error":
+                send({"type": "error", "session": sid, "message": text})
+            else:
+                send({"type": kind, "session": sid, "text": text, "lang": lang})
+        return emit
 
     send({"type": "ready"})
     session = None
-    while (header := recv_exact(conn, 5)) is not None:
-        kind, length = header[:1], struct.unpack(">I", header[1:])[0]
-        payload = recv_exact(conn, length) if length else b""
-        if payload is None:
-            break
-        if kind == b"S":
-            if session:
-                session.end(cancel=True)
-            t = time.perf_counter()
-            session = Session(engine, payload.decode() or engine.language, emit)
-            log.info("session start (%.0f ms)", (time.perf_counter() - t) * 1000)
-        elif kind == b"A" and session:
-            session.push(payload)
-        elif kind in (b"E", b"X") and session:
-            session.end(cancel=kind == b"X")
-            session = None
-    if session:
-        session.end(cancel=True)
-    conn.close()
+    sessions = 0
+    decoder_set = 0
+    try:
+        while (header := recv_exact(conn, 5)) is not None:
+            kind, length = header[:1], struct.unpack(">I", header[1:])[0]
+            payload = recv_exact(conn, length) if length else b""
+            if payload is None:
+                break
+            if kind == b"C":
+                decoder_set = int(payload or b"0")
+                engine.decoders(decoder_set)  # load now, not when the first audio arrives
+            elif kind == b"S":
+                if session:
+                    session.end(cancel=True)
+                sessions += 1
+                t = time.perf_counter()
+                session = Session(engine, payload.decode() or engine.language, emitter(sessions), decoder_set)
+                log.info("session %d start on set %d (%.0f ms)", sessions, decoder_set, (time.perf_counter() - t) * 1000)
+            elif kind == b"P":
+                job = json.loads(payload)
+                polisher.submit(job["text"], lambda out, i=job["id"]: send({"type": "polished", "id": i, "text": out}))
+            elif kind == b"A" and session:
+                session.push(payload)
+            elif kind in (b"E", b"X") and session:
+                session.end(cancel=kind == b"X")
+                session = None
+    except Exception:
+        log.exception("client connection failed")
+    finally:  # an open session would hold its decoders forever
+        if session:
+            session.end(cancel=True)
+        conn.close()
     log.info("client disconnected")
 
 
@@ -295,12 +357,16 @@ def main():
                     help="pasted text: a second, more accurate decoder; same as --lookahead = single pass")
     ap.add_argument("--fp32", action="store_true", help="full precision (default fp16: same output, half memory)")
     ap.add_argument("--language", default="auto", help='"auto" or a locale like de-DE')
+    ap.add_argument("--polish-model", default=POLISH_MODEL, help="MLX model that polishes transcription segments")
+    ap.add_argument("--latin-only", action=argparse.BooleanOptionalAction, default=True,
+                    help="only emit Latin-script text (default); --no-latin-only for Greek, Cyrillic, ...")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
     dtype = torch.float32 if args.fp32 or args.device == "cpu" else torch.float16
-    engine = Engine(args.device, args.lookahead, args.final_lookahead, args.language, dtype)
+    engine = Engine(args.device, args.lookahead, args.final_lookahead, args.language, dtype, args.latin_only)
     engine.warm_up()
+    polisher = Polisher(engine.gpu, args.polish_model)
 
     os.makedirs(os.path.dirname(args.socket), exist_ok=True)
     if os.path.exists(args.socket):
@@ -312,7 +378,7 @@ def main():
     while True:
         conn, _ = srv.accept()
         log.info("client connected")
-        Thread(target=serve_client, args=(engine, conn), daemon=True).start()
+        Thread(target=serve_client, args=(engine, polisher, conn), daemon=True).start()
 
 
 if __name__ == "__main__":

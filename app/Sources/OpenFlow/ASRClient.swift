@@ -2,22 +2,31 @@ import Foundation
 
 /// Talks to the Python sidecar over its Unix socket (framing documented in asr/server.py).
 final class ASRClient {
+    /// `session` numbers the start() calls on this connection from 1, matching the server's count.
     enum Event {
         case ready
-        case partial(String, String?)
-        case final(String, String?)
+        case partial(session: Int, text: String, lang: String?)
+        case final(session: Int, text: String, lang: String?)
+        case polished(id: Int, text: String)
         case error(String)
         case disconnected
     }
 
     let socketPath: String
+    /// Server-side model set; a second concurrent audio stream needs its own (see asr/server.py).
+    let decoderSet: Int
     var onEvent: (Event) -> Void = { _ in }
     private(set) var isConnected = false
 
     private var fd: Int32 = -1
     private let writeQueue = DispatchQueue(label: "openflow.asr.write")
+    private let counter = NSLock()
+    private var sessions = 0
 
-    init(socketPath: String) { self.socketPath = socketPath }
+    init(socketPath: String, decoderSet: Int = 0) {
+        self.socketPath = socketPath
+        self.decoderSet = decoderSet
+    }
 
     func connect() -> Bool {
         let s = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -39,14 +48,42 @@ final class ASRClient {
         setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
         fd = s
         isConnected = true
+        counter.lock()
+        sessions = 0
+        counter.unlock()
+        if decoderSet != 0 { send("C", Data(String(decoderSet).utf8)) }
         Thread { [weak self] in self?.readLoop(s) }.start()
         return true
     }
 
-    func start(language: String = "") { send("S", Data(language.utf8)) }
+    /// Ends the connection; the read loop reports `.disconnected`.
+    func disconnect() {
+        let s = fd
+        guard s >= 0 else { return }
+        writeQueue.async { shutdown(s, SHUT_RDWR) }  // after frames already queued
+    }
+
+    /// Starts a session and returns its number. Safe to call from the audio thread.
+    @discardableResult
+    func start(language: String = "") -> Int {
+        counter.lock()
+        sessions += 1
+        let id = sessions
+        counter.unlock()
+        send("S", Data(language.utf8))
+        return id
+    }
+
     func sendAudio(_ pcm: Data) { send("A", pcm) }
     func end() { send("E") }
     func cancel() { send("X") }
+
+    /// Asks the server's local LLM to clean up a transcript segment; answers with `.polished(id:)`.
+    /// Empty text only loads the model.
+    func polish(id: Int, text: String) {
+        guard let payload = try? JSONSerialization.data(withJSONObject: ["id": id, "text": text]) else { return }
+        send("P", payload)
+    }
 
     private func send(_ kind: Character, _ payload: Data = Data()) {
         let s = fd
@@ -95,10 +132,12 @@ final class ASRClient {
               let type = obj["type"] as? String else { return nil }
         let text = obj["text"] as? String ?? ""
         let lang = obj["lang"] as? String
+        let session = obj["session"] as? Int ?? 0
         switch type {
         case "ready": return .ready
-        case "partial": return .partial(text, lang)
-        case "final": return .final(text, lang)
+        case "partial": return .partial(session: session, text: text, lang: lang)
+        case "final": return .final(session: session, text: text, lang: lang)
+        case "polished": return .polished(id: obj["id"] as? Int ?? -1, text: text)
         case "error": return .error(obj["message"] as? String ?? "unknown")
         default: return nil
         }
