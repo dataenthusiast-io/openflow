@@ -77,6 +77,7 @@ private struct TranscriptView: View {
     @ObservedObject var model: TranscriptModel
     var onStop: () -> Void
     var onClose: () -> Void
+    @State private var following = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -194,16 +195,35 @@ private struct TranscriptView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 16) {
-                    ForEach(blocks) { BlockView(block: $0) }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        ForEach(blocks) { BlockView(block: $0) }
+                        Color.clear.frame(height: 1).id(Self.end)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 16)
                 }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 16)
+                .defaultScrollAnchor(.bottom)
+                // Follow new text unless the reader scrolled up; scrolling back to the end resumes it.
+                .onScrollPhaseChange { _, phase, context in
+                    guard phase == .idle else { return }
+                    let g = context.geometry
+                    following = g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 60
+                }
+                .onChange(of: Self.revision(of: blocks)) {
+                    guard following else { return }
+                    withAnimation(.smooth(duration: 0.3)) { proxy.scrollTo(Self.end, anchor: .bottom) }
+                }
             }
-            .defaultScrollAnchor(.bottom)
-            .defaultScrollAnchor(.bottom, for: .sizeChanges)
         }
+    }
+
+    private static let end = "end"
+
+    /// Changes whenever text is added or replaced anywhere in the transcript.
+    private static func revision(of blocks: [TranscriptModel.Block]) -> Int {
+        blocks.reduce(blocks.count) { n, b in b.segments.reduce(n) { $0 &+ $1.text.count &+ $1.id &* 31 } }
     }
 
     // MARK: Footer
@@ -214,6 +234,11 @@ private struct TranscriptView: View {
                 Label(notice, systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
+            }
+            if model.cancellingEcho && model.ended == nil {
+                Label("Speakers: removing their audio from your mic", systemImage: "speaker.wave.2")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
             Label("Always get consent when transcribing others.", systemImage: "info.circle")
                 .font(.system(size: 11))

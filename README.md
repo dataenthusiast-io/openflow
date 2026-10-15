@@ -67,6 +67,7 @@ The menu bar menu has:
   next one starts instantly with 300 ms of pre-roll. A closed mic needs ~100–200 ms to deliver audio,
   which can clip a first word spoken together with the key press. With this off, the orange mic
   indicator is only on while you dictate.
+- **Cancel Speaker Echo While Transcribing** (on by default), see below.
 - **Sounds**, **Add Space After Text**, **Launch at Login**.
 - "um" is only treated as a filler in English, because it's a real German word ("um zehn Uhr").
 
@@ -96,6 +97,11 @@ speaker detection, and nothing leaves the Mac).
 - The transcript is written to `YYYY-MM-DD HH-MM.md` in the transcripts folder
   (`~/Documents/OpenFlow/Transcripts` unless changed in the menu) after every finished segment (atomic
   rewrite), so a crash loses at most the segment being spoken. No audio is stored.
+- **On speakers** the mic also hears the other side. When the Mac plays through its speakers, a
+  display, HDMI or AirPlay, the mic runs through macOS voice processing, which removes what the
+  speakers play (any app's audio) and keeps your voice, also while you talk over someone. Other apps
+  aren't turned down. As a second line of defense, runs of 3+ words under "You" that "Them" said
+  within 20 s are cut, keeping your own words around them. With headphones neither is needed.
 - The panel's footer reminds you: always get consent when transcribing others.
 - Toggle from scripts or Shortcuts: post the distributed notification `dev.openflow.toggleTranscription`.
 

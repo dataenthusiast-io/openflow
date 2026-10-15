@@ -29,6 +29,8 @@ final class TranscriptModel: ObservableObject {
     @Published var themLevel: Float = 0
     @Published var notice: String?
     @Published var fileURL: URL?
+    /// The mic runs through macOS echo cancellation (speakers, not headphones).
+    @Published var cancellingEcho = false
 
     struct Block: Identifiable {
         let id: Int
@@ -148,7 +150,8 @@ final class Transcriber {
         mic.onLevel = { [model] level in
             DispatchQueue.main.async { model.level = 0.5 * model.level + 0.5 * level }
         }
-        try mic.begin(device: AudioDevices.resolve(Settings.microphone))
+        model.cancellingEcho = Settings.cancelEcho && AudioDevices.outputIsSpeakers()
+        try mic.begin(device: AudioDevices.resolve(Settings.microphone), cancelEcho: model.cancellingEcho)
         isActive = true
         begin(you)
         mic.onAudio = { [weak self, you] pcm in self?.feed(you, pcm) }
@@ -281,19 +284,69 @@ final class Transcriber {
     // MARK: - Echo removal
 
     /// Without headphones the mic also hears the speakers, so what "Them" said shows up again under
-    /// "You". A "You" sentence of 3+ words, most of whose words "Them" said within 20 s, is an echo.
+    /// "You", often mixed with your own words when you talk over someone. See `stripEcho`.
     private func withoutEcho(_ text: String, segment id: Int) -> String {
         guard let seg = model.segments.first(where: { $0.id == id }), seg.speaker == .you else { return text }
-        let said = Set(model.segments
+        let theirs = model.segments
             .filter { $0.speaker == .them && abs($0.start.timeIntervalSince(seg.start)) < 20 }
-            .flatMap { Self.words($0.text) + Self.words($0.heard) })
-        guard !said.isEmpty else { return text }
-        let sentences = Self.sentences(text)
-        let kept = sentences.filter { sentence in
-            let w = Self.words(sentence)
-            return w.count < 3 || Double(w.filter(said.contains).count) / Double(w.count) < 0.6
+            .flatMap { [$0.text, $0.heard] }
+        return Self.stripEcho(text, theirs: theirs)
+    }
+
+    /// Cuts runs of 3+ words that also occur in `theirs` (bridging one misheard word), plus 2-word
+    /// pieces of `theirs` touching such a run or the text's ends. What's left is yours; a single
+    /// leftover word between echoes is usually a recognition error and goes too.
+    static func stripEcho(_ text: String, theirs: [String]) -> String {
+        var tri = Set<String>(), bi = Set<String>()
+        for t in theirs {
+            let w = words(t)
+            for i in w.indices.dropLast(1) { bi.insert(w[i] + " " + w[i + 1]) }
+            for i in w.indices.dropLast(2) { tri.insert(w[i..<i + 3].joined(separator: " ")) }
         }
-        return kept.count == sentences.count ? text : kept.joined(separator: " ")
+        let tokens = text.split(separator: " ").map(String.init)
+        let norm = tokens.map { words($0).joined() }
+        let n = tokens.count
+        guard !tri.isEmpty, n >= 3 else { return text }
+        var echo = [Bool](repeating: false, count: n)
+        for i in 0...(n - 3) where tri.contains(norm[i..<i + 3].joined(separator: " ")) {
+            echo[i] = true; echo[i + 1] = true; echo[i + 2] = true
+        }
+        guard echo.contains(true) else { return text }
+        for i in 1..<(n - 1) where !echo[i] && echo[i - 1] && echo[i + 1] { echo[i] = true }
+        for i in 0..<(n - 1) where !echo[i] && !echo[i + 1] && bi.contains(norm[i] + " " + norm[i + 1]) {
+            let touches = i == 0 || i + 1 == n - 1 || echo[i - 1] || (i + 2 < n && echo[i + 2])
+            if touches { echo[i] = true; echo[i + 1] = true }
+        }
+        var kept: [String] = [], run: [String] = []
+        for i in 0..<n {
+            if !echo[i] { run.append(tokens[i]) }
+            if echo[i] || i == n - 1 {
+                if run.count >= 2 { kept += run }
+                run = []
+            }
+        }
+        var out = kept.joined(separator: " ").trimmingCharacters(in: CharacterSet(charactersIn: " ,;"))
+        if let first = out.first, first.isLowercase { out = first.uppercased() + out.dropFirst() }
+        return out
+    }
+
+    static func echoSelfTest() -> Bool {
+        let them = ["Hey, can you review the pull request before launch? I think the streaming latency looks really good now."]
+        let cases: [(String, String)] = [
+            ("Hey can you review the pull request before launch", ""),
+            ("Hey can you review the pull request yes I'll do it before launch", "Yes I'll do it"),
+            ("Hey can you review the full request before launch", ""),  // one misheard word inside
+            ("Sure, I'll review it after lunch.", "Sure, I'll review it after lunch."),
+            ("I think the streaming latency looks really good now, but the build is slow", "But the build is slow"),
+            ("Ja genau, das machen wir so.", "Ja genau, das machen wir so."),
+        ]
+        var ok = true
+        for (input, want) in cases {
+            let got = stripEcho(input, theirs: them)
+            print(got == want ? "PASS" : "FAIL", " echo: \(input)  ->  \(got)")
+            ok = ok && got == want
+        }
+        return ok
     }
 
     /// Re-checks finished "You" segments once more "Them" text is in.
@@ -307,22 +360,8 @@ final class Transcriber {
         }
     }
 
-    private static func words(_ s: String) -> [String] {
+    static func words(_ s: String) -> [String] {
         s.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
-    }
-
-    private static func sentences(_ s: String) -> [String] {
-        var out: [String] = [], current = ""
-        for ch in s {
-            current.append(ch)
-            if ".!?".contains(ch) {
-                out.append(current.trimmingCharacters(in: .whitespaces))
-                current = ""
-            }
-        }
-        let rest = current.trimmingCharacters(in: .whitespaces)
-        if !rest.isEmpty { out.append(rest) }
-        return out
     }
 
     private func update(_ id: Int, _ change: (inout TranscriptSegment) -> Void) {

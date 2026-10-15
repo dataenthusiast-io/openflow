@@ -11,6 +11,7 @@ enum Settings {
             "sounds": true,
             "trailingSpace": true,
             "keepMicWarm": false,  // the orange mic dot lingering after dictating looks like spying
+            "cancelEcho": true,
         ])
     }
 
@@ -41,6 +42,12 @@ enum Settings {
     static var keepMicWarm: Bool {
         get { d.bool(forKey: "keepMicWarm") }
         set { d.set(newValue, forKey: "keepMicWarm") }
+    }
+
+    /// Transcription mode on speakers: remove what the speakers play from the mic signal.
+    static var cancelEcho: Bool {
+        get { d.bool(forKey: "cancelEcho") }
+        set { d.set(newValue, forKey: "cancelEcho") }
     }
 
     static let defaultTranscriptsFolder = FileManager.default.homeDirectoryForCurrentUser

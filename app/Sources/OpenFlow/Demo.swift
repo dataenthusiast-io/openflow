@@ -54,7 +54,7 @@ func runTranscriptDemo() {
         model.reset()
         panel.show()
         var t = 0.8
-        for (i, (speaker, raw, polished)) in script.enumerated() {
+        for (i, (speaker, raw, polished)) in Array(repeating: script, count: 3).joined().enumerated() {  // long enough to scroll
             let words = raw.split(separator: " ").map(String.init)
             let start = t
             DispatchQueue.main.asyncAfter(deadline: .now() + start) {

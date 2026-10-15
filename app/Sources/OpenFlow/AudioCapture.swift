@@ -16,6 +16,7 @@ final class AudioCapture {
 
     private var source: AudioSource?
     private var sourceUID: String?  // nil = system default
+    private var sourceEchoCancelling = false
     private var coolDown: DispatchWorkItem?
 
     // Shared with the audio thread.
@@ -30,17 +31,21 @@ final class AudioCapture {
     }
 
     /// Start delivering audio from `device` (nil = system default input).
-    func begin(device: AudioInputDevice?) throws {
+    /// `cancelEcho` turns on macOS voice processing, which removes what the speakers play from the
+    /// mic signal (any app's audio, not just ours). Only the default-device path supports it.
+    func begin(device: AudioInputDevice?, cancelEcho: Bool = false) throws {
         coolDown?.cancel()
         // The default device takes the AVAudioEngine path even when picked explicitly.
         let uid = device.flatMap { $0.id == AudioDevices.systemDefault() ? nil : $0.uid }
-        if source != nil, uid != sourceUID { shutdown() }
+        let echo = cancelEcho && uid == nil
+        if source != nil, uid != sourceUID || echo != sourceEchoCancelling { shutdown() }
         if source == nil {
             let deliver: (UnsafeBufferPointer<Int16>) -> Void = { [weak self] in self?.handle($0) }
             let onLost: () -> Void = { [weak self] in self?.shutdown() }
             source = try uid.map { try SessionSource(uid: $0, deliver: deliver) }
-                ?? EngineSource(deliver: deliver, onLost: onLost)
+                ?? EngineSource(deliver: deliver, onLost: onLost, cancelEcho: echo)
             sourceUID = uid
+            sourceEchoCancelling = echo
         }
         lock.lock()
         capturing = true
@@ -108,15 +113,30 @@ private final class EngineSource: AudioSource {
     private let engine = AVAudioEngine()
     private var configObserver: NSObjectProtocol?
 
-    init(deliver: @escaping (UnsafeBufferPointer<Int16>) -> Void, onLost: @escaping () -> Void) throws {
+    init(deliver: @escaping (UnsafeBufferPointer<Int16>) -> Void, onLost: @escaping () -> Void, cancelEcho: Bool) throws {
         let input = engine.inputNode
+        if cancelEcho {
+            try input.setVoiceProcessingEnabled(true)
+            // Voice processing turns other apps down by default; the meeting must stay audible.
+            input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
+        }
         let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, let converter = AVAudioConverter(from: format, to: target) else {
+        // With voice processing the input has 9 channels; the first is the echo-cancelled mic.
+        guard format.sampleRate > 0, let mono = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: 1),
+              let converter = AVAudioConverter(from: format.channelCount > 1 ? mono : format, to: target) else {
             throw NSError(domain: "OpenFlow", code: 1, userInfo: [NSLocalizedDescriptionKey: "no converter for \(format)"])
         }
         let ratio = target.sampleRate / format.sampleRate
 
-        input.installTap(onBus: 0, bufferSize: 1600, format: format) { buffer, _ in
+        input.installTap(onBus: 0, bufferSize: 1600, format: format) { tapped, _ in
+            var buffer = tapped
+            if format.channelCount > 1 {
+                guard let first = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: tapped.frameLength),
+                      let src = tapped.floatChannelData?[0] else { return }
+                first.frameLength = tapped.frameLength
+                first.floatChannelData![0].update(from: src, count: Int(tapped.frameLength))
+                buffer = first
+            }
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 32
             guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
             var fed = false

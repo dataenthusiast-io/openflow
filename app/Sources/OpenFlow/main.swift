@@ -4,7 +4,8 @@ import ServiceManagement
 if CommandLine.arguments.contains("--selftest") {
     let fillers = FillerFilter.selfTest()
     let formatting = TextFormatter.selfTest()
-    exit(fillers && formatting ? 0 : 1)
+    let echo = Transcriber.echoSelfTest()
+    exit(fillers && formatting && echo ? 0 : 1)
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -357,6 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(toggle("Sounds", Settings.sounds, #selector(toggleSounds)))
         menu.addItem(toggle("Add Space After Text", Settings.trailingSpace, #selector(toggleTrailingSpace)))
         menu.addItem(toggle("Keep Mic Ready for 30 s", Settings.keepMicWarm, #selector(toggleKeepMicWarm)))
+        menu.addItem(toggle("Cancel Speaker Echo While Transcribing", Settings.cancelEcho, #selector(toggleCancelEcho)))
         menu.addItem(toggle("Launch at Login", SMAppService.mainApp.status == .enabled, #selector(toggleLogin)))
         menu.addItem(.separator())
         menu.addItem(item("Restart ASR", #selector(restartASR)))
@@ -462,6 +464,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleSounds() { Settings.sounds.toggle() }
     @objc private func toggleTrailingSpace() { Settings.trailingSpace.toggle() }
 
+    @objc private func toggleCancelEcho() { Settings.cancelEcho.toggle() }
+
     @objc private func toggleKeepMicWarm() {
         Settings.keepMicWarm.toggle()
         if !Settings.keepMicWarm, case .idle = state { audio.shutdown() }
@@ -491,6 +495,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 if CommandLine.arguments.contains("--mictest") {
     runMicTest()
+    exit(0)
+}
+
+if let i = CommandLine.arguments.firstIndex(of: "--echotest"), i + 1 < CommandLine.arguments.count {
+    runEchoTest(clip: CommandLine.arguments[i + 1])
     exit(0)
 }
 

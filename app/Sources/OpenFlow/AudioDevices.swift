@@ -49,6 +49,26 @@ enum AudioDevices {
         }
     }
 
+    /// True when the default output is a loudspeaker the mic can hear (built-in speakers, a display,
+    /// HDMI, AirPlay), false for headphones of any kind.
+    static func outputIsSpeakers() -> Bool {
+        guard let out = uint32(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice),
+              let transport = uint32(out, kAudioDevicePropertyTransportType) else { return false }
+        switch transport {
+        case kAudioDeviceTransportTypeBuiltIn:
+            // The headphone jack is a data source of the built-in device.
+            var addr = address(kAudioDevicePropertyDataSource, scope: kAudioDevicePropertyScopeOutput)
+            var source: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            let ok = AudioObjectGetPropertyData(out, &addr, 0, nil, &size, &source) == noErr
+            return !(ok && source == 0x6864_706E)  // 'hdpn'
+        case kAudioDeviceTransportTypeDisplayPort, kAudioDeviceTransportTypeHDMI, kAudioDeviceTransportTypeAirPlay:
+            return true
+        default:
+            return false
+        }
+    }
+
     // MARK: - CoreAudio helpers
 
     private static func address(_ selector: AudioObjectPropertySelector,

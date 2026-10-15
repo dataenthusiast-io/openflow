@@ -80,3 +80,56 @@ func runSystemAudioTest() {
     }
     try? out.write(toFile: "/tmp/openflow-systemaudiotest.txt", atomically: true, encoding: .utf8)
 }
+
+/// `open -n OpenFlow.app --args --echotest CLIP.wav`: records the default mic while another process
+/// plays CLIP through the speakers, without and with macOS voice processing (echo cancellation).
+/// Writes levels to /tmp/openflow-echotest.txt and the recordings to /tmp/openflow-echo-{off,on}.caf.
+func runEchoTest(clip: String) {
+    var out = ""
+    func wait(_ s: Double) { RunLoop.main.run(until: Date().addingTimeInterval(s)) }
+    func rms(_ x: ArraySlice<Float>) -> Float { x.isEmpty ? 0 : sqrt(x.reduce(0) { $0 + $1 * $1 } / Float(x.count)) }
+    for vp in [false, true] {
+        let engine = AVAudioEngine()
+        let input = engine.inputNode
+        do {
+            try input.setVoiceProcessingEnabled(vp)
+            if vp { input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min) }
+        } catch {
+            out += "voice processing \(vp): \(error.localizedDescription)\n"
+            continue
+        }
+        let format = input.outputFormat(forBus: 0)
+        var samples: [Float] = []
+        let lock = NSLock()
+        input.installTap(onBus: 0, bufferSize: 4800, format: format) { buf, _ in
+            guard let ch = buf.floatChannelData?[0] else { return }
+            lock.lock()
+            samples.append(contentsOf: UnsafeBufferPointer(start: ch, count: Int(buf.frameLength)))
+            lock.unlock()
+        }
+        do { try engine.start() } catch { out += "start \(vp): \(error.localizedDescription)\n"; continue }
+        wait(1.5)
+        lock.lock(); let quietEnd = samples.count; lock.unlock()
+        let player = Process()
+        player.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+        player.arguments = [clip]
+        try? player.run()
+        while player.isRunning { wait(0.05) }
+        lock.lock(); let playEnd = samples.count; lock.unlock()
+        wait(0.5)
+        engine.stop()
+        input.removeTap(onBus: 0)
+        let quiet = rms(samples[0..<quietEnd]), playing = rms(samples[quietEnd..<playEnd])
+        out += String(format: "voice processing %@: %.0f Hz × %d ch, room %.4f, while playing %.4f (%.1f dB above room)\n",
+                      vp ? "ON " : "OFF", format.sampleRate, format.channelCount, quiet, playing, 20 * log10(max(playing, 1e-6) / max(quiet, 1e-6)))
+        let mono = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: 1)!
+        if let file = try? AVAudioFile(forWriting: URL(fileURLWithPath: "/tmp/openflow-echo-\(vp ? "on" : "off").caf"), settings: mono.settings),
+           let buf = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: AVAudioFrameCount(samples.count)) {
+            buf.frameLength = AVAudioFrameCount(samples.count)
+            samples.withUnsafeBufferPointer { buf.floatChannelData![0].update(from: $0.baseAddress!, count: samples.count) }
+            try? file.write(from: buf)
+        }
+        wait(0.5)
+    }
+    try? out.write(toFile: "/tmp/openflow-echotest.txt", atomically: true, encoding: .utf8)
+}
